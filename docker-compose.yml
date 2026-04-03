@@ -1,0 +1,47 @@
+services:
+  camoufox:
+    build:
+      context: ./services/camoufox
+    environment:
+      - CAMOUFOX_PORT=1234
+      - CAMOUFOX_WS_PATH=ws
+    expose:
+      - "1234"
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: crawler
+      POSTGRES_PASSWORD: crawler
+      POSTGRES_DB: crawldb
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler -d crawldb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  dev:
+    build:
+      context: .
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - BROWSER_WS_URL=ws://camoufox:1234/ws
+      - DATABASE_URL=postgresql://crawler:crawler@db:5432/crawldb
+    depends_on:
+      camoufox:
+        condition: service_started
+      db:
+        condition: service_healthy
+    working_dir: /app
+    stdin_open: true
+    tty: true
+
+volumes:
+  pgdata:
