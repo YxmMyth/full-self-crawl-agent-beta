@@ -1,12 +1,13 @@
 # Full-Self-Crawl-Agent Beta — 实施指引
 
 > 用途：给 Claude Code 的实施蓝图
-> 日期：2026-03-18
+> 日期：2026-03-18（最后更新：2026-04-05）
 >
 > **前置阅读（必读，按顺序）：**
 > 1. 本文档
 > 2. `架构共识文档.md` — 系统设计的完整共识
-> 3. `SiteWorldModel设计文档.md` — 数据模型设计
+> 3. `docs/WorldModel设计.md` — 数据模型设计（取代旧 SiteWorldModel设计文档.md）
+> 4. `docs/工具重新设计共识.md` — 工具层最新共识
 
 ---
 
@@ -21,8 +22,7 @@ ReconPlanner.run(domain, requirement)
   → 初始化 SiteWorldModel
   → loop:
       Agent Session（自主探索、记录、提取）
-      → reflect(wm)      # 从新observations提炼insight
-      → decide_next(wm)  # 继续？停止？什么方向？
+      → evaluate_and_decide(wm)  # 更新 Semantic/Procedural Model + DONE/CONTINUE
       → generate_briefing(wm, direction)  # 生成下一轮任务简报
   → 编译最终报告
 ```
@@ -34,7 +34,7 @@ ReconPlanner.run(domain, requirement)
 ```
 ReconPlanner（战略层）
   管理 World Model 生命周期
-  reflect / decide_next / generate_briefing
+  evaluate_and_decide / generate_briefing
   总预算管理
   不决定 agent 去哪个 URL，不微管理探索顺序
       │
@@ -43,8 +43,8 @@ ReconPlanner（战略层）
 Agent Session（执行层）
   接收 briefing + system prompt
   自主决定导航、观察、提取
-  10 个工具（browse/interact/bash/...）
-  发现即记录（note_insight/note_relation）
+  工具集详见 docs/工具重新设计共识.md
+  发现即记录（note_insight）
 ```
 
 ---
@@ -106,7 +106,7 @@ services:
 | `asyncpg` >=0.29.0 | PostgreSQL |
 | `beautifulsoup4` >=4.12.0 | HTML 解析 |
 | `httpx` >=0.25.0 | 异步 HTTP |
-| `duckduckgo-search` >=6.0.0 | search_site |
+| `duckduckgo-search` >=6.0.0 | 域名锁定搜索（通过 bash 调用） |
 | `python-dotenv` >=1.0.0 | .env 加载 |
 
 ---
@@ -117,24 +117,22 @@ services:
 src/
 ├── main.py                    # CLI 入口
 ├── planner/
-│   └── recon_planner.py       # ReconPlanner：reflect / decide_next / generate_briefing / 主循环
+│   └── recon_planner.py       # ReconPlanner：evaluate_and_decide / generate_briefing / 主循环
 ├── agent/
 │   ├── session.py             # Agent Session 执行循环
-│   └── tools/                 # 10 个工具实现
-│       ├── browse.py
-│       ├── interact.py
-│       ├── search_site.py
-│       ├── bash_tool.py
-│       ├── execute_code.py
-│       ├── think.py
-│       ├── note_insight.py
-│       ├── note_relation.py
-│       ├── read_wm.py
-│       └── extract.py
+│   └── tools/                 # 工具实现（具体列表见 docs/工具重新设计共识.md）
+│       ├── browse.py          # 页面内容快照
+│       ├── read_network.py    # 网络层信息
+│       ├── browser_eval.py    # 浏览器内 JS 执行
+│       ├── interact.py        # 页面交互
+│       ├── bash_tool.py       # 系统代码执行
+│       ├── think.py           # 推理
+│       ├── note_insight.py    # 记录洞察
+│       └── read_wm.py         # 查询 World Model
 ├── world_model/
 │   ├── model.py               # SiteWorldModel dataclass
 │   ├── db.py                  # PostgreSQL CRUD
-│   └── schema.sql             # DDL（见 SiteWorldModel设计文档.md）
+│   └── schema.sql             # DDL（见 docs/WorldModel设计.md）
 ├── llm/
 │   └── client.py              # OpenAI-compatible 统一客户端
 ├── browser/
@@ -144,7 +142,7 @@ src/
     └── logging.py             # 结构化日志
 ```
 
-`planner/` 不拆多文件。reflect / decide_next / generate_briefing 都是 LLM 调用，逻辑简单，放一个文件里直到复杂度要求拆分。
+`planner/` 不拆多文件。evaluate_and_decide / generate_briefing 都是 LLM 调用，逻辑简单，放一个文件里直到复杂度要求拆分。
 
 ---
 
@@ -152,9 +150,9 @@ src/
 
 ### Step 1：World Model 数据层
 
-DB schema（4 张表，见 SiteWorldModel设计文档.md）+ Python dataclass + async CRUD。
+DB schema（4 张表：locations / observations / models / sessions，见 docs/WorldModel设计.md）+ Python dataclass + async CRUD。
 
-**验证：** 能 connect → create tables → 写入 location + observation + relation → 加载完整 World Model → 加载空 World Model。
+**验证：** 能 connect → create tables → 写入 location + observation → 加载完整 World Model → 加载空 World Model。
 
 ### Step 2：浏览器 + LLM 客户端
 
@@ -165,7 +163,7 @@ DB schema（4 张表，见 SiteWorldModel设计文档.md）+ Python dataclass + 
 
 **LLM 客户端两种调用模式：**
 - `chat_with_tools(messages, tools)` — Agent Session 用，解析 tool_calls
-- `generate(prompt, system?)` — ReconPlanner 用（reflect / decide_next / generate_briefing）
+- `generate(prompt, system?)` — ReconPlanner 用（evaluate_and_decide / generate_briefing）
 
 **重试策略：**
 - content_filter 错误：重试 3 次，每次 sleep 2s
@@ -174,29 +172,29 @@ DB schema（4 张表，见 SiteWorldModel设计文档.md）+ Python dataclass + 
 
 **验证：** 能连 Camoufox 导航页面；能调 LLM 拿到 tool_calls 响应。
 
-### Step 3：工具集（10 个）
+### Step 3：工具集
 
-每个工具的设计说明见架构共识文档§六。这里补充实施要点：
+工具设计详见 `docs/工具重新设计共识.md`。核心工具按能力层分：
 
-**browse(url)：** 核心工具。导航 + 自动写 World Model（创建/更新 Location，追加 Observation）+ 返回结构化摘要给 LLM。摘要至少应包含标题、可交互元素概况、链接模式。需要做 SPA 空壳检测：如果元素很多但可见文本很少，提示 agent 页面可能需要交互/等待才能加载内容。
+**浏览器感知（三个不可互替的能力层）：**
+- `browse(url?)` — 页面内容快照（Markdown+HTML 混合格式 + SPA settle）
+- `read_network(filter?)` — 网络层信息（请求/响应/cookies，JS 无法获取的数据）
+- `browser_eval(script, save_as?)` — 浏览器内 JS 执行（探测 + 提取 + 检查）
 
-**interact(action, target)：** 统一 click / fill / scroll_down / scroll_up / select / press_key。`action` 是动作类型字符串，`target` 是 CSS selector 或描述。
+**页面交互：**
+- `interact(action, target, value?)` — 统一交互，target 为元素编号
 
-**extract(script, key)：** 在浏览器执行 JS 提取数据。自动追加 Observation（提取方法 + 样本索引）。样本数据存文件（`artifacts/samples/`），Observation 中存引用路径。返回摘要给 LLM（记录数、字段名、前几条预览），不把完整数据塞进 context。
+**系统执行：**
+- `bash(command)` — 浏览器外代码执行（API 重放、数据处理、搜索）
 
-**bash(command) / execute_code(code, lang)：** subprocess 执行，30 秒超时，Docker 容器隔离。
+**认知辅助：**
+- `think(thought)` — 无副作用推理
+- `note_insight(content, location?)` — 写 World Model（含原 note_relation 功能）
+- `read_world_model(section?)` — 查询 World Model
 
-**note_insight(content, location?) / note_relation(from, to, relation)：** 写 World Model。location 参数接受 pattern 字符串，自动解析到 location_id。
+**ToolRegistry：** 注册 + JSON Schema 生成 + 分发执行。
 
-**read_world_model(section?)：** 返回格式化的 World Model 快照。section 可选过滤（locations / observations / relations / all）。
-
-**search_site(query)：** 域名锁定搜索（`site:domain query`），使用 DuckDuckGo。
-
-**think(thought)：** 无副作用，返回 ok。
-
-**ToolRegistry：** 注册 + JSON Schema 生成 + 分发执行。所有 session 使用同一套工具集。
-
-**验证：** 每个工具独立调用成功；browse 自动写 World Model；extract 保存样本到文件。
+**验证：** 每个工具独立调用成功；browse 返回页面快照；browser_eval 能探测和提取数据。
 
 ### Step 4：Agent Session
 
@@ -204,7 +202,7 @@ DB schema（4 张表，见 SiteWorldModel设计文档.md）+ Python dataclass + 
 
 **三层停止：**
 1. LLM 不再调工具 → 自然结束（while 循环的自然出口）
-2. 步数预算耗尽（初始值 30 步/session）→ 强制结束
+2. 步数预算耗尽（Planner 在 briefing 中给软预算，硬上限兜底）→ 强制结束
 3. 连续失败 ≥ 5 → 强制结束
 
 **System Prompt：** 短、稳定。教 agent 怎么想（5 条思维原则，见架构共识文档§五）。不含任何站点特定信息。
@@ -219,14 +217,14 @@ DB schema（4 张表，见 SiteWorldModel设计文档.md）+ Python dataclass + 
 
 **主循环：** 见本文档§一的核心循环描述。
 
-**reflect / decide_next / generate_briefing：** 都是 LLM 调用。prompt 措辞实施时调试，框架见架构共识文档§三。reflect 和 decide_next 可以合并为一次调用。
+**evaluate_and_decide / generate_briefing：** 都是 LLM 调用。evaluate_and_decide 同时更新 Semantic Model / Procedural Model 并输出 DONE/CONTINUE。详见 docs/系统架构与信息流.md。
 
 **停止条件：**
-1. decide_next 返回 DONE
+1. evaluate_and_decide 返回 DONE
 2. 总 session 数达到上限（初始值 10 轮）
-3. 连续 N 轮 reflect 无新 insight（初始值 3 轮）
+3. 连续 N 轮无新发现（初始值 3 轮）
 
-**验证：** 给 codepen.io + 一个 requirement，能跑完多轮 session，World Model 有 locations / observations / relations / reflections，最终停止。
+**验证：** 给 codepen.io + 一个 requirement，能跑完多轮 session，World Model 有 locations / observations / Semantic Model / Procedural Model，最终停止。
 
 ---
 
@@ -250,8 +248,8 @@ codepen.io 的特征（agent 应该自己发现这些，不要硬编码，但可
 2. ReconPlanner 发起 Session，Agent 自主导航探索
 3. World Model 中出现多个 Location（tag 页、详情页、API 端点等）
 4. Observations 包含：页面摘要、agent 洞察、提取方法
-5. Relations 记录了位置间关系（如列表→详情、子集关系）
-6. reflect 产出了高层 insight（如"三条数据路径的覆盖关系"）
+5. Semantic Model 记录了结构理解和位置间关系
+6. evaluate_and_decide 产出了高层 insight（如"三条数据路径的覆盖关系"）
 7. `artifacts/samples/` 中有提取的数据样本
 8. decide_next 最终返回 DONE
 
@@ -272,7 +270,7 @@ codepen.io 的特征（agent 应该自己发现这些，不要硬编码，但可
 2. **不预设数据 schema。** 没有 target_fields。
 3. **不预设关系类型枚举。** Agent 自由描述。
 4. **Observation 只追加不修改。**
-5. **所有知识都是 Observation。** 不拆独立表。
+5. **三层记忆架构。** Episodic（Observations，只追加）+ Semantic Model + Procedural Model（LLM 维护的有界文档）。详见 docs/WorldModel设计.md。
 6. **智能优先。** 信息的组织、筛选、呈现交给 LLM，不硬编码。
 7. **不硬编码控制流。** Agent 自己决定去哪、看什么、提什么。
 8. **System prompt 教怎么想，Briefing 告诉想什么。**
