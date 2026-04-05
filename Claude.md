@@ -217,7 +217,10 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 
 **主循环：** 见本文档§一的核心循环描述。
 
-**evaluate_and_decide / generate_briefing：** 都是 LLM 调用。evaluate_and_decide 同时更新 Semantic Model / Procedural Model 并输出 DONE/CONTINUE。详见 docs/系统架构与信息流.md。
+**Session 间三步流程：**
+1. **Session 后录制**（独立 LLM 调用）：分析 session transcript → 写结构化 Observations。不占 Agent 也不占 Planner 注意力。
+2. **evaluate_and_decide**（Planner LLM 调用）：读新 Observations + 完整 WM → 更新 Semantic/Procedural Model → DONE/CONTINUE。
+3. **generate_briefing**（Planner LLM 调用）：从 WM 生成下一轮 briefing。
 
 **停止条件：**
 1. evaluate_and_decide 返回 DONE
