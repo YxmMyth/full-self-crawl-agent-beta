@@ -127,7 +127,6 @@ src/
 │       ├── interact.py        # 页面交互
 │       ├── bash_tool.py       # 系统代码执行
 │       ├── think.py           # 推理
-│       ├── note_insight.py    # 记录洞察
 │       └── read_wm.py         # 查询 World Model
 ├── world_model/
 │   ├── model.py               # SiteWorldModel dataclass
@@ -189,8 +188,9 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 
 **认知辅助：**
 - `think(thought)` — 无副作用推理
-- `note_insight(content, location?)` — 写 World Model（含原 note_relation 功能）
 - `read_world_model(section?)` — 查询 World Model
+
+注：note_insight 不再需要——录制 Agent 在 session 结束后全权负责 Observation 写入。
 
 **ToolRegistry：** 注册 + JSON Schema 生成 + 分发执行。
 
@@ -218,7 +218,7 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 **主循环：** 见本文档§一的核心循环描述。
 
 **Session 间三步流程：**
-1. **Session 后录制**（独立 LLM 调用）：分析 session transcript → 写结构化 Observations。不占 Agent 也不占 Planner 注意力。
+1. **录制 Agent**（独立 LLM 调用，共享 prompt cache）：session 结束后跑一个总的，分析完整 transcript → 写结构化 Observations 到 DB。可用更轻模型。
 2. **evaluate_and_decide**（Planner LLM 调用）：读新 Observations + 完整 WM → 更新 Semantic/Procedural Model → DONE/CONTINUE。
 3. **generate_briefing**（Planner LLM 调用）：从 WM 生成下一轮 briefing。
 
