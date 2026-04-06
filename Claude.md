@@ -71,18 +71,23 @@ LLM_MODEL=<model-name>
 
 | 服务 | 连接方式 | 必需 |
 |------|----------|------|
-| Camoufox 反检测浏览器 | WebSocket `ws://camoufox:1234/ws` | 是（可降级本地 Chromium） |
-| PostgreSQL 16 | asyncpg `postgresql://user:pass@db:5432/dbname` | 是 |
+| Camoufox 反检测浏览器 | Python 直接启动（pipe 通信） | 是（可降级本地 Chromium） |
+| PostgreSQL 16 | asyncpg `postgresql://user:pass@localhost:5432/dbname` | 是（本地安装或云数据库） |
 | LLM API | HTTPS（OpenAI-compatible gateway） | 是 |
 
-### Docker Compose
+### 运行环境
 
-```yaml
-services:
-  camoufox:    # 反检测 Firefox，暴露 ws://camoufox:1234/ws
-  db:          # PostgreSQL 16，端口 5432
-  dev:         # 开发容器，源码 bind mount
+**MVP 完全本地运行，不使用 Docker。**
+
 ```
+本地环境：
+  Python 3.10+ (venv)
+  Camoufox（通过 camoufox Python 包直接启动）
+  PostgreSQL（本地安装或云数据库如 Supabase/Neon）
+```
+
+Docker Compose 作为**可选部署方案**保留，用于：生产服务器部署、团队环境一致性、CI/CD。
+不作为 MVP 开发的必需项。
 
 ### 环境变量
 
@@ -92,7 +97,7 @@ services:
 | `LLM_BASE_URL` | 是 | gateway 地址 |
 | `LLM_MODEL` | 否 | 模型名，默认值待定 |
 | `DATABASE_URL` | 是 | PostgreSQL 连接串 |
-| `BROWSER_WS_URL` | 否 | Camoufox WS URL，默认 `ws://camoufox:1234/ws` |
+| `BROWSER_WS_URL` | 否 | 远程 Camoufox WS URL（本地直接启动时不需要） |
 | `ARTIFACTS_DIR` | 否 | 样本输出目录，默认 `./artifacts` |
 
 预留（MVP 不实现）：`AUTH_GITHUB_STATE`、`AUTH_GOOGLE_STATE` — 未来认证能力。
@@ -101,6 +106,7 @@ services:
 
 | 库 | 用途 |
 |----|------|
+| `camoufox` >=0.4.11 | 反检测浏览器（Python 直接启动） |
 | `playwright` >=1.40.0 | 浏览器自动化 |
 | `openai` >=1.0.0 | LLM API（通过 gateway） |
 | `asyncpg` >=0.29.0 | PostgreSQL |
@@ -156,9 +162,10 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 ### Step 2：浏览器 + LLM 客户端
 
 **浏览器连接优先级：**
-1. `BROWSER_WS_URL` 环境变量 → `playwright.connect(ws_url)`（Camoufox）
-2. `BROWSER_CDP_URL` 环境变量 → `playwright.connect_over_cdp(url)`
-3. 都没有 → `playwright.chromium.launch()` 本地启动
+1. 默认 → `AsyncCamoufox(headless=True)` 直接启动（pipe 通信，最快最简单）
+2. `BROWSER_WS_URL` 环境变量 → `playwright.firefox.connect(ws_url)`（远程 Camoufox）
+3. `BROWSER_CDP_URL` 环境变量 → `playwright.connect_over_cdp(url)`（远程 Chromium）
+4. Camoufox 不可用 → `playwright.chromium.launch()` 本地 Chromium 兜底
 
 **LLM 客户端两种调用模式：**
 - `chat_with_tools(messages, tools)` — Agent Session 用，解析 tool_calls
@@ -284,14 +291,19 @@ codepen.io 的特征（agent 应该自己发现这些，不要硬编码，但可
 
 ## 七、安全模型
 
-**安全边界：Docker 容器。** 容器内 agent 有完整权限（浏览器、bash、文件系统），这是设计决定。
+**安全边界：专用运行环境（本地开发机或专用服务器）。** Agent 有完整权限（浏览器、bash、文件系统），这是设计决定。
+
+**bash 安全策略（无 Docker 时）：**
+- MVP：受限用户 + 工作目录权限限制，专用服务器（炸了重部署）
+- 后续可选：命令模式验证器（参考 Claude Code 的 22+ bash validator）
+- Docker 沙箱作为可选加强方案保留
 
 **信任边界：**
 - LLM 输出不可信：工具调用需参数验证（防格式错误导致崩溃，不是防恶意）
-- 目标网站不可信：agent 在容器内操作，不影响宿主机
+- 目标网站不可信：agent 在受限环境内操作
 - 操作员完全可信
 
-**密钥管理：** 环境变量注入，不写入代码。
+**密钥管理：** 环境变量注入（.env），不写入代码。
 
 ---
 
