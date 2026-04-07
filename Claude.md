@@ -126,10 +126,11 @@ src/
 │   └── recon_planner.py       # ReconPlanner：evaluate_and_decide / generate_briefing / 主循环
 ├── agent/
 │   ├── session.py             # Agent Session 执行循环
-│   └── tools/                 # 工具实现（具体列表见 docs/工具重新设计共识.md）
-│       ├── browse.py          # 页面内容快照
+│   └── tools/                 # 8 个工具（详见 docs/工具重新设计共识.md）
+│       ├── browse.py          # 页面内容快照 + 多标签页导航
 │       ├── read_network.py    # 网络层信息
 │       ├── browser_eval.py    # 浏览器内 JS 执行
+│       ├── browser_reset.py   # 浏览器重启/重配置
 │       ├── interact.py        # 页面交互
 │       ├── bash_tool.py       # 系统代码执行
 │       ├── think.py           # 推理
@@ -183,9 +184,12 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 工具设计详见 `docs/工具重新设计共识.md`。核心工具按能力层分：
 
 **浏览器感知（三个不可互替的能力层）：**
-- `browse(url?)` — 页面内容快照（Markdown+HTML 混合格式 + SPA settle）
+- `browse(url?, new_tab?, tab?)` — 页面内容快照 + 多标签页导航
 - `read_network(filter?)` — 网络层信息（请求/响应/cookies，JS 无法获取的数据）
 - `browser_eval(script, save_as?)` — 浏览器内 JS 执行（探测 + 提取 + 检查）
+
+**浏览器管理：**
+- `browser_reset(proxy?, browser_type?, headed?)` — 重启浏览器到新配置（每 agent 独占一个浏览器）
 
 **页面交互：**
 - `interact(action, target, value?)` — 统一交互，target 为元素编号
