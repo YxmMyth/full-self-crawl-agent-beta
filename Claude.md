@@ -126,12 +126,16 @@ src/
 │   └── recon_planner.py       # ReconPlanner：evaluate_and_decide / generate_briefing / 主循环
 ├── agent/
 │   ├── session.py             # Agent Session 执行循环
-│   └── tools/                 # 8 个工具（详见 docs/工具重新设计共识.md）
+│   └── tools/                 # 12 个工具（详见 docs/工具重新设计共识.md）
 │       ├── browse.py          # 页面内容快照 + 多标签页导航
 │       ├── read_network.py    # 网络层信息
 │       ├── browser_eval.py    # 浏览器内 JS 执行
 │       ├── browser_reset.py   # 浏览器重启/重配置
-│       ├── interact.py        # 页面交互
+│       ├── click.py           # 点击元素
+│       ├── input.py           # 输入/选择
+│       ├── press_key.py       # 按键
+│       ├── scroll.py          # 滚动
+│       ├── go_back.py         # 浏览器后退
 │       ├── bash_tool.py       # 系统代码执行
 │       ├── think.py           # 推理
 │       └── read_wm.py         # 查询 World Model
@@ -183,25 +187,30 @@ DB schema（4 张表：locations / observations / models / sessions，见 docs/W
 
 工具设计详见 `docs/工具重新设计共识.md`。核心工具按能力层分：
 
-**浏览器感知（三个不可互替的能力层）：**
+**浏览器感知（3 个）：**
 - `browse(url?, new_tab?, tab?)` — 页面内容快照 + 多标签页导航
 - `read_network(filter?)` — 网络层信息（请求/响应/cookies，JS 无法获取的数据）
 - `browser_eval(script, save_as?)` — 浏览器内 JS 执行（探测 + 提取 + 检查）
 
-**浏览器管理：**
-- `browser_reset(proxy?, browser_type?, headed?)` — 重启浏览器到新配置（每 agent 独占一个浏览器）
+**浏览器管理（1 个）：**
+- `browser_reset(proxy?, browser_type?, headed?)` — 重启浏览器到新配置
 
-**页面交互：**
-- `interact(action, target, value?)` — 统一交互，target 为元素编号
+**页面交互（5 个，原 interact 按参数模式拆分）：**
+- `click(target)` — 点击元素（自动识别 `<select>` 转下拉处理）
+- `input(target, value)` — 输入/选择（自动检测 autocomplete，执行后验证值）
+- `press_key(key, target?)` — 按键（支持组合键 "Ctrl+A"）
+- `scroll(direction?, amount?, target?)` — 滚动（支持水平 + 容器内滚动）
+- `go_back()` — 浏览器后退
 
-**系统执行：**
+**系统执行（1 个）：**
 - `bash(command)` — 浏览器外代码执行（API 重放、数据处理、搜索）
 
-**认知辅助：**
+**认知辅助（2 个）：**
 - `think(thought)` — 无副作用推理
 - `read_world_model(section?)` — 查询 World Model
 
 注：note_insight 不再需要——录制 Agent 在 session 结束后全权负责 Observation 写入。
+交互工具内置智能行为（元素类型识别、autocomplete 检测、值验证、新元素标记 `*`、对话框自动处理），详见工具重新设计共识 §2.3。
 
 **ToolRegistry：** 注册 + JSON Schema 生成 + 分发执行。
 
