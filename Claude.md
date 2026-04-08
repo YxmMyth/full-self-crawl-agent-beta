@@ -147,9 +147,18 @@ src/
 │   └── client.py              # OpenAI-compatible 统一客户端
 ├── browser/
 │   └── manager.py             # Playwright / Camoufox 连接管理
+├── recording/
+│   └── agent.py               # 录制 Agent：分析 message array → 写 Observations
 └── utils/
     ├── url.py                 # URL 规范化
     └── logging.py             # 结构化日志
+
+# 运行时文件结构（per-domain）
+artifacts/{domain}/
+├── samples/                   # 提取的数据样本（browser_eval save_as）
+├── scripts/                   # 可复用脚本（精准记忆）
+├── workspace/                 # 临时文件、bash 大输出落盘
+└── transcripts/               # session 完整记录（JSONL）
 ```
 
 `planner/` 不拆多文件。evaluate_and_decide / generate_briefing 都是 LLM 调用，逻辑简单，放一个文件里直到复杂度要求拆分。
