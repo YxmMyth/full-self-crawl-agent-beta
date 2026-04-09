@@ -53,7 +53,7 @@ Agent 在 session 内经历的认知循环：
   ↓
 决策（继续当前方向？换方法？探索新发现？该停了？）
 
-注：Agent 不负责记录——Session 结束后由录制 Agent 从完整 message array 中提取结构化 Observations。
+注：Agent 不负责记录——录制 Agent（独立持久对话 + tool-use 循环）实时并行维护 Observations。
   ↓
 （循环）
 ```
@@ -91,8 +91,8 @@ Session 内的 context 管理采用分层衰减（与 Planner 的策略一致）
 
 ### World Model 作为外部记忆
 
-- Agent 的关键发现由录制 Agent（session 后）写入 World Model
-- Context 内丢失的信息可以通过 `read_world_model` 找回
+- 录制 Agent 与执行 Agent **实时并行**——同构架构（持久对话 + tool-use），用 4 个工具维护 Observations
+- Context 内丢失的早期信息可以通过 `read_world_model` 找回（录制 Agent 已实时维护）
 - Agent 不需要主动记录——它的 context 就是工作记忆，录制 Agent 负责结构化
 
 ### 不需要 Session 级 Model
@@ -178,7 +178,7 @@ Agent 的能力来自五个来源，不能混为一谈：
 
 认知辅助（2 个）：
   think(thought)                        — 推理
-  read_world_model(section?)            — 查询 World Model
+  read_world_model(location?)           — 查询 World Model（无参数=完整Models，有location=该location的Observations）
 ```
 
 **与旧版（7 工具）的变化：**
@@ -247,7 +247,7 @@ artifacts/{domain}/
 ├── samples/          ← browser_eval save_as 存的数据样本
 ├── scripts/          ← 可复用脚本（精准记忆，Procedural Model 索引）
 ├── workspace/        ← 临时文件、bash 大输出落盘
-└── transcripts/      ← session 完整记录（JSONL，录制 Agent 的输入）
+└── transcripts/      ← session 完整记录（JSONL，持久化存档）
 ```
 
 - browser_eval 的 `save_as` 参数让 agent 控制文件命名和路径
@@ -431,14 +431,15 @@ tool description 中写清楚这些对应关系，agent 自然知道怎么用。
 - curl_cffi 可用于 TLS 指纹模拟
 
 **read_world_model：**
-- section 过滤 + location 模糊匹配
-- 默认返回 Semantic Model + Procedural Model + Location 索引
+- 两层检索：Model 是索引，Observations 是证据
+- `read_world_model()` → 返回完整 Semantic + Procedural Model（全局概览）
+- `read_world_model(location=X)` → 返回该 location 的 Observations（局部证据）
 
 **think：**
 - 1 参数（thought），返回 "ok"，no-op
 - tau-bench +54.1%，BrowseComp +40.1%
 
-**录制 Agent：已删除。** 录制 Agent 在 session 结束后从完整 message array 中提取结构化 Observations，全权负责 WM 写入。
+**录制 Agent：独立于执行 Agent 工具集。** 与执行 Agent 同构（持久对话 + tool-use 循环），拥有 4 个专属工具（read/create/edit/delete observations）。程序注入执行 transcript 增量，录制 Agent 先 read 再改（参考 Claude Code 的 Read/Edit 模式）。Transcript（JSONL）是不可变审计追踪。
 
 ### 7.7 设计原则（调研共识）
 
@@ -562,7 +563,7 @@ Session loop 中内建：
 Agent 的信息来源有三个：
 1. **System prompt**（稳定）— 所有 session 相同，教怎么想和做
 2. **Briefing**（动态）— 每 session 不同，Planner 编译，含方向 + 相关原始 observations
-3. **read_world_model**（按需拉取）— Agent 主动查询 Semantic Model、Procedural Model、observation 索引
+3. **read_world_model**（按需拉取）— 无参数返回完整 Models（全局概览），指定 location 返回该 location 的 Observations（局部证据）
 
 System prompt 只负责教 Agent 的认知纪律和方法论。具体"这次做什么"由 briefing 告诉。站点的结构化理解（Semantic Model）和方法论（Procedural Model）由 Agent 通过 read_world_model 按需获取，不在 system prompt 中。
 
@@ -640,7 +641,7 @@ Agent 执行 Planner 通过 briefing 下达的方向。核心产出是写入 Wor
 | "提取优先嵌入 JSON > API > DOM" | System prompt（跨工具策略） |
 | "browse 返回的网络请求摘要格式是..." | Tool description（单工具说明） |
 | "interact 后不需要再调 browse，变化反馈已包含在返回值中" | Tool description（单工具说明） |
-| "每个重要发现用 录制 Agent 记录" | System prompt（跨工具纪律） |
+| "录制 Agent 实时并行记录，需要回忆时调 read_world_model" | System prompt（跨工具纪律） |
 | "需要刷新记忆时调 read_world_model" | System prompt（跨工具纪律） |
 | "bash 可以做 HTTP 请求、数据处理、代码执行" | Tool description（单工具说明） |
 
