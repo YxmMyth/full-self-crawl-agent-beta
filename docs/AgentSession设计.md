@@ -62,13 +62,13 @@ Agent 在 session 内经历的认知循环：
 
 ---
 
-## 三、步数预算（共识）
+## 三、Session 生命周期（共识）
 
-**不固定步数。** 不同任务复杂度差异巨大——发现型任务 10 步够了，深度提取可能需要 80 步。
+**没有固定步数限制。** Session 跑到自然完成或 context window 满为止（类似 Claude Code subagent 模式）。
 
-- **Planner 在 briefing 中给软预算**：Planner 比固定值更能判断任务需要的步数
-- **硬上限兜底**：防止失控的安全网（如 100 步）
-- Planner 的预算判断随经验改进——前几轮可能不准，后续通过 session 结果反馈调整
+- **自然完成**：LLM 不再调工具，认为 briefing 意图已回应
+- **Context 满**：context window 耗尽，强制结束
+- **连续失败**：框架级错误连续 ≥ 5 次，强制结束
 
 ---
 
@@ -78,16 +78,21 @@ Agent 在 session 内经历的认知循环：
 
 Agent 在长 session 中需要"进度意识"——知道自己做了什么、还差什么。这不需要额外结构，靠 **context 管理 + World Model 外部记忆** 解决。
 
-### Context 分层衰减
+### Context 管理：Microcompact（参考 Claude Code）
 
-Session 内的 context 管理采用分层衰减（与 Planner 的策略一致）：
+每次 LLM 调用前程序化处理，零 LLM 成本：
 
 ```
-最近 N 步 → 完整保留（tool call + 完整返回值）
-更早的步骤 → 保留 tool name + 结果摘要（程序化截断，不是 LLM 摘要）
+最近 5 个 API round 的 tool results → 完整保留
+更早的大输出工具 results → 替换为 "[已清除，调 read_world_model 查回]"
+小输出工具 results → 不清除（永远保留）
+所有 tool_use blocks（工具名+参数）→ 永远保留
 ```
 
-早期发现的核心信息仍然存在，只是细节被压缩。
+**大输出工具**（清除旧 results）：browse, browser_eval, bash, read_network
+**小输出工具**（不清除）：click, input, scroll, press_key, go_back, think, read_world_model, browser_reset
+
+不需要 LLM 摘要（auto-compact）——录制 Agent 已实时外化知识到 DB，旧内容可通过 read_world_model 查回。
 
 ### World Model 作为外部记忆
 
@@ -128,10 +133,10 @@ Session 内不需要独立的 model 文档。原因：
 Session 内的停止判断：
 
 1. **LLM 不再调工具** → 自然结束（agent 认为任务完成）
-2. **步数达到硬上限** → 强制结束
-3. **连续框架级失败 ≥ N** → 强制结束（框架错误，非正常工具返回的"没找到"类软错误）
+2. **Context window 满了** → 强制结束
+3. **连续框架级失败 ≥ 5** → 强制结束（框架错误，非正常工具返回的"没找到"类软错误）
 
-停止条件由代码强制。LLM 的自然停止是最理想的出口——agent 自己判断任务完成。
+停止条件由代码强制。LLM 的自然停止是最理想的出口——agent 自己判断任务完成。没有固定步数限制（类似 Claude Code subagent 模式）。
 
 ---
 
@@ -685,9 +690,30 @@ Agent 执行 Planner 通过 briefing 下达的方向。核心产出是写入 Wor
 
 ---
 
-## 十、Context 管理细节（待讨论）
+## 十、Context 管理（已达成共识）
 
-*分层衰减的具体实现策略。待讨论后补充。*
+### Microcompact（参考 Claude Code，程序化，零 LLM 成本）
+
+每次执行 Agent 的 LLM 调用前：
+
+1. 遍历 message array，按 API round 分组（一次 LLM 调用 = 一个 round）
+2. 最近 5 个 round 的所有 tool results → 完整保留
+3. 更早 round 中，大输出工具（browse / browser_eval / bash / read_network）的 results → 替换为 `[已清除，调 read_world_model 查回]`
+4. 小输出工具（click / input / scroll / press_key / go_back / think / read_world_model / browser_reset）的 results → 不清除
+5. 所有 tool_use blocks（工具名 + 参数）→ 永远保留
+
+### 为什么不需要 LLM 摘要
+
+- 录制 Agent 实时并行维护 Observations → 重要信息已外化到 DB
+- 执行 Agent 可通过 read_world_model 查回任何已记录的发现
+- microcompact 保留了工具名+参数 → agent 知道自己做过什么
+- 大输出被清除后，agent 仍能从 read_world_model 获取结构化知识
+
+### 设计依据
+
+- Claude Code microcompact：只清特定大输出工具的旧 results，保留 tool_use blocks
+- JetBrains NeurIPS 2025：简单 observation masking 跟 LLM 摘要一样有效，且零成本零幻觉
+- 我们的结构性优势：录制 Agent + World Model 是天然的外部记忆，比其他系统多一层保障
 
 ---
 
@@ -699,11 +725,11 @@ Agent 执行 briefing 给定的方向，以高质量的 observations 回应 brie
 
 理由：Agent 是任务驱动的执行者，不是自由探索者。它的自主性在战术层面（怎么做），不在战略层面（做什么）。Briefing 给方向，不给步骤。
 
-### D2: 步数不固定，Planner 给软预算
+### D2: 没有固定步数限制，context window 满了才停
 
-固定步数无法适应任务复杂度差异。Planner 更能判断任务需要多少步。硬上限兜底防失控。
+类似 Claude Code subagent 模式——跑到自然完成或 context 满为止。不需要 Planner 预估步数，microcompact 控制 context 增长。
 
-理由：发现型任务可能 10 步，深度提取可能 80 步。一刀切的 30 步既浪费简单任务的时间又限制复杂任务的能力。
+理由：步数预算是人为限制，不同任务复杂度差异巨大。context window 是自然的物理约束，配合 microcompact 可以支持很长的 session。
 
 ### D3: 进度意识靠 context 管理 + World Model，不需要 session-level model
 
