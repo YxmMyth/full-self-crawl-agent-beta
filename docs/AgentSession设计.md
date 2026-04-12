@@ -305,8 +305,10 @@ artifacts/{domain}/
 **参数：**
 ```
 browse(
-  url:    string?   — 导航目标，省略则刷新当前页面快照
-  visual: boolean?  — 触发截图 + 独立 vision LLM 文字描述（默认 false）
+  url:     string?   — 导航目标，省略则刷新当前页面快照
+  new_tab: boolean?  — 新标签页打开 url（默认 false）
+  tab:     integer?  — 切到第 N 个标签页（1-based）
+  visual:  boolean?  — 触发截图 + SoM 标注 + vision LLM 文字描述（默认 false）
 )
 ```
 
@@ -315,7 +317,7 @@ browse(
 - 静态文本 → Markdown（标题/段落/列表/表格，减 80% token）
 - 交互元素 → `[N]<tag attr="val">text</tag>` 编号 HTML
 - 图片 → `![alt text](src)` Markdown 图片语法（保留 alt 和 src）
-- data-* 属性 → 在编号元素上保留有业务含义的 data-*（过滤框架注入的）
+- data-* 属性 → 全部保留（agent 自己判断哪些有业务含义，不程序化过滤）
 - 容器元素 → `<nav>`/`<section>` 保留层级但不编号
 - 列表截断 → 超过 5 个同构项展示前 3 个 + `... (N more, M total)`
 
@@ -346,14 +348,17 @@ Author: John | Views: 1,234
 - 每次 browse/interact 后重建，不跨页面持久
 - 存入 ToolContext.selector_map，interact 通过编号查找
 
-**数据信号（始终检测，独立 section）：**
+**数据信号（通用检测，独立 section）：**
+
+不命名特定框架（"智能优先，不硬编码"），只报告事实：
 ```
 --- Data Signals ---
-Framework: Next.js (detected: #__next, __NEXT_DATA__)
-Embedded JSON:
-  __NEXT_DATA__: 127KB, props.pageProps has 20 pen objects
-  JSON-LD: 1 schema (type: WebPage)
+Script data (3 found):
+  <script id="__NEXT_DATA__" type="application/json">: 127KB
+  <script type="application/ld+json">: 2KB
+  inline <script>: 3 blocks, largest 45KB
 ```
+Agent 看到 `__NEXT_DATA__` 自己判断这是 Next.js，不需要程序判断。
 
 **网络请求捕获（始终开启，独立 section）：**
 ```
@@ -364,10 +369,9 @@ API Requests Captured (3):
 Filtered: 12 tracking/analytics, 8 static assets
 ```
 
-**大页面三层控制：**
-1. 视口过滤（默认只返回可见区域）
-2. 列表截断（>5 同构项）
-3. Token 硬上限（~8000，可配置）
+**大页面两层控制（不做视口过滤，参考 Claude Code read_page 的全量返回策略）：**
+1. 列表截断（best effort：同父 + 同 tag + 连续 > 5 → 保留前 3 + 计数。漏检不影响——token 上限兜底）
+2. Token 硬上限（~8000，可配置。超出时在末尾标注 `[truncated at ~8000 tokens, scroll + browse() for more]`）
 
 **视觉模式（visual=true）：**
 - 视口截图（不做全页截图，业界共识）
@@ -402,13 +406,41 @@ tool description 中写清楚这些对应关系，agent 自然知道怎么用。
 
 | 工具 | 参数 | 示例 |
 |------|------|------|
-| `click(target)` | 元素编号 | `click("3")` |
-| `input(target, value)` | 元素编号 + 文本 | `input("8", "threejs")` |
+| `click(target)` | 元素编号 | `click(3)` |
+| `input(target, value)` | 元素编号 + 文本 | `input(8, "threejs")` |
 | `press_key(key, target?)` | 按键名 + 可选元素 | `press_key("Enter")` |
 | `scroll(direction?, amount?, target?)` | 方向/屏数/容器 | `scroll("down", 2)` |
 | `go_back()` | 无参数 | `go_back()` |
 
 **拆分理由：** SWE-Agent 消融实验证明细粒度工具优于粗粒度 enum。不同参数签名的操作不应合并——click 只需 target，input 需 target+value，scroll 需 direction。
+
+**跨工具统一行为：**
+- 导致 URL 变化的交互 → 自动附带新页面 browse 快照（省一步，参考 Agent-E）
+- 不导致 URL 变化 → 返回确认 + 提示 browse()
+- 所有工具作用于当前活跃标签页（agent 通过 browse(tab=N) 切换）
+
+**各工具返回格式：**
+
+`click(target)`:
+- 正常：`Clicked [3] <a>View Pen</a>. Page unchanged.`
+- 导航：`Clicked [3] → navigated to /pen/abc123` + 新页面 browse 快照
+- select 检测：列出选项，提示用 input() 选择
+
+`input(target, value)`:
+- 正常：`Typed "threejs" into [5]. Actual: "threejs" ✓`
+- 值被格式化：`⚠ Actual: "(123) 456-7890"` — 警告 agent
+- autocomplete：`[waited 400ms] Suggestions appeared (*3 new elements)`
+
+`press_key(key, target?)`:
+- 正常：`Pressed Enter on [5]. Page unchanged.`
+- 导航：同 click，附带新页面 browse 快照
+
+`scroll(direction?, amount?, target?)`:
+- `Scrolled down 1 screen. Position: ~33% (720px of ~2160px)`
+
+`go_back()`:
+- 正常：`Back → /tag/threejs` + 新页面 browse 快照
+- 栈空：`Cannot go back — no history.`
 
 **元素定位：只接受编号。** 编号来自 browse 返回的页面快照，编号失效时返回明确错误 + 提示 browse 刷新。
 
@@ -416,22 +448,39 @@ tool description 中写清楚这些对应关系，agent 自然知道怎么用。
 
 | 错误 | 返回信息 |
 |------|---------|
-| 编号不存在 | "Element [N] does not exist. Use browse() to refresh." |
+| 编号不存在 | "Element [N] not found. Use browse() to refresh." |
 | 元素被遮挡 | "Element [N] is behind an overlay." |
 | 元素不可交互 | "Element [N] is not interactable (disabled/hidden)." |
 
 **内置智能行为（对 agent 透明）：** 见 §7.3
 
+**Microcompact 注意：** 交互工具通常是小输出，但导致导航时返回 browse 快照（大输出）。Microcompact 按实际 result 大小判断是否清除，而非按工具名分类。
+
 ### 7.8 其他工具调研结论
 
-**browser_eval（原 extract，已拓宽为通用 JS 执行器）：**
-- 纯 JS page.evaluate，`save_as` 可选参数
-- 通用能力：探测数据格局、提取数据、检查状态、调用页面内 API
-- 错误分类 + hint 帮助 agent 自调试（CodeAct 自调试模式 +2-12%）
+**read_network（网络层信息，独立于 browse）：**
+- 参数：`filter`（string contains 过滤，同 Claude Code）、`clear`（读完清空缓冲区）
+- 返回：请求列表（method/URL/status/size）+ response body preview（每条 1000 chars）+ cookies（含 HttpOnly）
+- POST 请求额外显示 request body（知道参数怎么传）
+- Cookies 只显示 name + flags + domain，不显示完整 value
+- 与 browse 的 Network 摘要是信号→详情关系：browse 给方向，read_network 给数据
+- 末尾 tip 引导 agent 用 bash curl 重放获取完整数据
 
-**bash：**
-- 无状态 subprocess.run，command + timeout 参数
-- 大输出自动落盘 workspace/ + 返回预览和文件路径
+**browser_eval（原 extract，已拓宽为通用 JS 执行器）：**
+- 参数：`script`（JS 代码，支持 async/await，不需要 return）+ `save_as`（可选，保存到 samples/）
+- 在当前活跃标签页执行（不需要 tabId，agent 通过 browse(tab=N) 控制）
+- 通用能力：探测数据格局、提取数据、检查状态、调用页面内 API
+- 返回标注 type + size（agent 不用猜结果类型）
+- 大结果 >50KB 自动落盘 workspace/ + 返回 preview（与 bash 一致）
+- 执行超时 30s
+- 错误返回 raw error + 程序化 hints（几条 if/else 匹配常见错误模式：null property access、element not found、timeout、not defined），CodeAct 自调试模式 +2-12%
+
+**bash（借鉴 Claude Code BashTool）：**
+- 参数：`command` + `timeout`（可选，默认 120s，最大 600s）
+- 每次 spawn 新进程（无状态），工作目录固定 `artifacts/{domain}/workspace/`
+- 输出上限 30,000 chars，尾部截断 + `[output truncated — NKB removed]` 标记（同 Claude Code）
+- 大输出同时自动落盘 workspace/（命名 bash_NNN.txt）+ 返回 preview + 文件路径
+- 返回始终包含 exit code
 - 安全边界：受限用户 + 专用服务器（不使用 Docker）
 - curl_cffi 可用于 TLS 指纹模拟
 
