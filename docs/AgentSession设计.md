@@ -401,7 +401,7 @@ browse 不试图一次返回一切。它返回**决策所需的信息 + 信号**
 
 | browse 返回的信号 | agent 的自然反应 |
 |------------------|----------------|
-| `__NEXT_DATA__ found (127KB, 20 objects)` | → 调 extract 提取嵌入 JSON |
+| `Script data: <script type="application/json"> 127KB` | → 调 browser_eval 提取嵌入 JSON |
 | `API captured: GET /api/v2/pens → 200 (20 items)` | → 调 bash curl 重放 API |
 | `SPA empty shell detected` | → 页面可能没加载好，等一下再 browse |
 | 图片 `![3D scene](...)` + briefing 要求视觉评估 | → 调 browse(visual=true) |
@@ -570,7 +570,7 @@ wm_snapshot.json     ← session 结束时的 World Model 快照
   "reasoning": "LLM 在调工具前的文字输出（最重要的调试数据）",
   "tool": "browse",
   "input": {"url": "https://codepen.io/tag/threejs"},
-  "output_summary": "42 elements, 3 API captured, __NEXT_DATA__ detected",
+  "output_summary": "42 elements, 3 API captured, 1 script data block (127KB)",
   "output_full_path": "outputs/step_001_browse.txt",
   "tokens_in": 1234,
   "tokens_out": 567,
@@ -588,9 +588,9 @@ wm_snapshot.json     ← session 结束时的 World Model 快照
 ```
 Session abc123 | 15 steps | outcome: natural_stop | 2m34s
 ───────────────────────────────────────────────
- 1. browse  codepen.io/tag/threejs     → 42 elements, 3 API, __NEXT_DATA__
- 2. think   "page has embedded JSON, try extract first"
- 3. extract __NEXT_DATA__              → 15 pens → samples/pens/threejs_p1.jsonl
+ 1. browse  codepen.io/tag/threejs     → 42 elements, 3 API, 1 script data (127KB)
+ 2. think   "page has embedded JSON in script tag, try browser_eval first"
+ 3. browser_eval embedded JSON         → 15 items → samples/threejs_p1.json
  4. browse  codepen.io/pen/abcdef      → detail page, 28 elements
  5. extract pen detail                 → 12 fields, 2 null → samples/pens/detail_abcdef.jsonl
  ...
@@ -660,7 +660,7 @@ Agent 执行 Planner 通过 briefing 下达的方向。核心产出是写入 Wor
 
 #### 感知
 
-- browse 返回多维信号：DOM 结构、交互元素索引、网络请求捕获、嵌入数据检测（__NEXT_DATA__ 等）、框架检测。全部注意，不只是看页面文字
+- browse 返回多维信号：DOM 结构、交互元素索引、网络请求捕获、嵌入数据检测（script tags with structured data）。全部注意，不只是看页面文字
 - 这些信号直接指导下一步行动——检测到嵌入 JSON 说明有低成本提取路径，捕获到 API 说明可以直接重放
 
 #### 广度意识
@@ -675,16 +675,16 @@ Agent 执行 Planner 通过 briefing 下达的方向。核心产出是写入 Wor
 
 | 好的 observation | 差的 observation |
 |-----------------|-----------------|
-| "extract via page.evaluate('#__NEXT_DATA__'), 15 records, fields: [id, title, author, views], author 字段 2/15 为 null" | "提取了一些 pen 数据" |
-| "/api/v1/pens?tag=threejs 返回 JSON, 25 条, 比页面多 10 条, 额外字段: [forks, likes, created_at]" | "发现了一个 API" |
-| "DOM .pen-card 只有 title 和 author, 缺少 views/likes, 不如 __NEXT_DATA__ 完整" | "DOM 提取不太好" |
+| "browser_eval extracted embedded JSON from script tag, 15 records, fields: [id, title, author, views], author 字段 2/15 为 null" | "提取了一些数据" |
+| "/api/v1/items?tag=X 返回 JSON, 25 条, 比页面多 10 条, 额外字段: [forks, likes, created_at]" | "发现了一个 API" |
+| "DOM .item-card 只有 title 和 author, 缺少 views/likes, 不如嵌入 JSON 完整" | "DOM 提取不太好" |
 
 方法论也要记录：不只记"发现了什么"，也记"怎么发现的"和"什么没用"。这些信息被 Planner 合成为 Procedural Model，帮助后续 session 避免重复工作。
 
 #### 方法选择
 
 提取数据时，优先使用成本最低的方法：
-1. 嵌入 JSON（__NEXT_DATA__ 等）— browse 返回的数据信号会提示是否存在
+1. 嵌入 JSON（script tags with structured data）— browse 返回的 Data Signals 会提示是否存在
 2. 网络捕获的 API — browse 返回的网络请求摘要会显示 JSON API
 3. 直接 API 调用 — 用 bash curl 调用已发现的端点
 4. DOM 提取 — 最常用但最脆弱，改版即失效
@@ -958,7 +958,7 @@ interact 返回操作结果 + 变化信号（URL 是否变化、DOM 是否变化
 
 interact = 手（操作页面）+ 触觉（检测变化信号）。browse = 眼（观察页面）+ 笔记（写入 World Model）。两者不重叠：interact 不做 browse 的分析工作，browse 不做 interact 的操作工作。agent 根据 interact 的变化信号决定是否需要 browse。
 
-理由：调研发现业界存在三种模式（自动快照/分离/循环级），非一种共识。选择分离模式因为：(1) browse 承担重职责（Location 创建、Observation 追加、框架检测、嵌入数据检测、网络捕获），interact 复制这些会导致代码重复；(2) 侦察场景中大量 click 是导航——agent 导航后通常需要 browse 的完整分析；(3) 职责单一更容易维护和调试。
+理由：调研发现业界存在三种模式（自动快照/分离/循环级），非一种共识。选择分离模式因为：(1) browse 承担重职责（Location 创建、Observation 追加、嵌入数据检测、网络捕获），interact 复制这些会导致代码重复；(2) 侦察场景中大量 click 是导航——agent 导航后通常需要 browse 的完整分析；(3) 职责单一更容易维护和调试。
 
 ---
 
