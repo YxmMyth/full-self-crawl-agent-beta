@@ -94,6 +94,18 @@ Agent 在长 session 中需要"进度意识"——知道自己做了什么、还
 
 不需要 LLM 摘要（auto-compact）——单例 Recording Agent 已实时外化知识到 DB，旧内容可通过 read_world_model 查回。
 
+### 录制 Agent 的 Context 管理（同 Microcompact 思路）
+
+录制 Agent 是持久单例，持续接收 transcript 增量，context 会增长。同样需要 microcompact：
+
+```
+最近的 transcript 增量（user message）→ 完整保留
+已处理的旧增量 → 替换为 "[transcript batch N — 已处理，产出 M 条 observations]"
+所有 tool_use blocks（create/edit/delete observations）→ 永远保留
+```
+
+机制与执行 Agent 完全同构——Python 代码在每次 LLM 调用前按轮次管理 message array。Transcript 原始数据不受影响（JSONL 不可变保存）。
+
 ### World Model 作为外部记忆
 
 - 单例 Recording Agent 与执行 Agent **实时并行**——通过 Producer-Consumer 模式接收所有 session 的 transcript 增量，用 4 个工具维护 Observations
