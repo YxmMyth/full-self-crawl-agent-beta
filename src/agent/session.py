@@ -64,6 +64,14 @@ when data patterns are unclear, or when comparing multiple findings.
 7. WHEN STUCK, CHANGE APPROACH. If a method fails twice, try something \
 different. Check read_world_model() for what's already been tried.
 
+8. WHEN A HUMAN-ONLY GATE BLOCKS YOU, ASK FOR HELP. Login forms, CAPTCHAs \
+(Turnstile/hCaptcha/FunCaptcha), 2FA/SMS/email codes, device verification \
+— call request_human_assist(reason="<be specific>"). Do NOT try to fill \
+credentials or solve puzzles yourself. After it returns, call browse() to \
+re-observe — the tool does NOT auto-confirm "login successful". You judge \
+from the new page state. Reserve this for true human-only gates, not for \
+"I haven't found X yet" exploration or pages that just need scrolling.
+
 ## Data Discovery Priority
 
 Not all data paths are equal:

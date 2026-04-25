@@ -15,12 +15,14 @@ from src.agent.tools.registry import ToolRegistry
 from src.agent.tools import (
     think, read_wm, browse, read_network, browser_eval, browser_reset,
     click, input as input_tool, press_key, scroll, go_back, bash_tool,
+    human_assist as human_assist_tool,
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
 from src.llm.client import LLMClient
 from src.planner.recon_planner import ReconPlanner
 from src.recording.agent import RecordingAgent
+from src.runtime.human_assist import TerminalGateway
 from src.utils.logging import setup, get_logger
 from src.world_model import db
 
@@ -28,11 +30,12 @@ logger = get_logger(__name__)
 
 
 def build_execution_registry() -> ToolRegistry:
-    """Register all 12 execution agent tools."""
+    """Register all 13 execution agent tools."""
     registry = ToolRegistry()
     tools = [
         think, read_wm, browse, read_network, browser_eval, browser_reset,
         click, input_tool, press_key, scroll, go_back, bash_tool,
+        human_assist_tool,
     ]
     for t in tools:
         registry.register(t.TOOL_NAME, t.TOOL_DESCRIPTION, t.TOOL_PARAMETERS, t.handle)
@@ -54,9 +57,14 @@ async def run(domain: str, requirement: str) -> None:
     await db.connect()
     logger.info("Database connected")
 
-    browser_manager = BrowserManager()
-    ctx = await browser_manager.launch(browser_type="camoufox", headed=True)
+    browser_manager = BrowserManager(domain=domain)
+    ctx = await browser_manager.launch()
     logger.info("Browser launched")
+
+    # Wire human_assist gateway — terminal-based for MVP, signal file under
+    # the domain's workspace dir so multiple domains don't collide.
+    ctx.human_assist = TerminalGateway(signal_dir=artifacts / "workspace")
+    logger.info(f"Human assist gateway ready (signal: {ctx.human_assist.signal_file})")
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")

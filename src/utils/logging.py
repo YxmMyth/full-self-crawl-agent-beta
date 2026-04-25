@@ -77,6 +77,15 @@ def setup(level: str = "INFO", json_output: bool = False) -> None:
         return
     _initialized = True
 
+    # Force UTF-8 stdout/stderr on Windows so unicode (CJK, emoji, ✓/✗) prints
+    # don't crash with GBK codec errors. Affects every print() in the process.
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, TypeError):
+            pass
+
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 

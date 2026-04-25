@@ -13,6 +13,7 @@ from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext as PlaywrightContext, Page
+    from src.runtime.human_assist import HumanAssistGateway
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,11 @@ class ToolContext:
     # Tab management
     tabs: list[Page] = field(default_factory=list)
     active_tab_idx: int = 0
+
+    # Human assistance gateway (set by main.py after launch). Tools that need
+    # to pause for human input call ctx.human_assist.request(reason, page).
+    # Optional — None means assist is unavailable in this run.
+    human_assist: HumanAssistGateway | None = None
 
     # ── Page access ──────────────────────────────────────
 
