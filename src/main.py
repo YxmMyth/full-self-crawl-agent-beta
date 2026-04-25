@@ -96,12 +96,16 @@ async def run(domain: str, requirement: str) -> None:
 
 
 def main() -> None:
-    """Entry point — hardcoded domain + requirement for MVP."""
+    """Entry point — accepts domain + requirement as CLI args or uses defaults."""
     setup(level="INFO")
 
-    # MVP target
-    domain = "codepen.io"
-    requirement = "找出 threejs 相关的 pen 数据：页面结构、数据来源（API/嵌入JSON/DOM）、提取方法、样本"
+    if len(sys.argv) >= 3:
+        domain = sys.argv[1]
+        requirement = sys.argv[2]
+    else:
+        # Default MVP target
+        domain = "codepen.io"
+        requirement = "找出 threejs 相关的 pen 数据：页面结构、数据来源（API/嵌入JSON/DOM）、提取方法、样本"
 
     try:
         asyncio.run(run(domain, requirement))
