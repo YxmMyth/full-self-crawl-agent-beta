@@ -210,3 +210,195 @@ class TerminalGateway(HumanAssistGateway):
     def _print_done(self, status: str) -> None:
         marker = {"completed": "✓", "timeout": "⏱", "cancelled": "✗"}.get(status, "•")
         print(f"\n{marker} Human assist {status}, agent resuming...\n", flush=True)
+
+
+# ── Browser overlay gateway (default for headed local runs) ──────────
+
+
+_OVERLAY_INIT_JS = r"""
+(() => {
+  const ID = '__claude_assist_overlay';
+
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  }
+
+  function ensureBody(cb) {
+    if (document.body) return cb();
+    const obs = new MutationObserver(() => {
+      if (document.body) { obs.disconnect(); cb(); }
+    });
+    obs.observe(document.documentElement || document, { childList: true, subtree: true });
+  }
+
+  window.__renderAssistOverlay = (reason) => {
+    ensureBody(() => {
+      let el = document.getElementById(ID);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = ID;
+        document.body.appendChild(el);
+      }
+      el.style.cssText = (
+        'position:fixed;top:16px;right:16px;z-index:2147483647;' +
+        'background:#fef3c7;color:#1f2937;' +
+        'border:2px solid #f59e0b;border-radius:10px;' +
+        'padding:16px 18px;max-width:360px;' +
+        'box-shadow:0 10px 30px rgba(0,0,0,0.18);' +
+        'font:14px/1.5 -apple-system,"Segoe UI",system-ui,sans-serif;'
+      );
+      el.innerHTML = (
+        '<div style="font-weight:600;color:#92400e;margin-bottom:8px;">' +
+        '\u23F8 HUMAN ASSIST NEEDED</div>' +
+        '<div id="' + ID + '_reason" style="margin-bottom:14px;white-space:pre-wrap;word-break:break-word;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+          '<button id="' + ID + '_done" style="flex:1;padding:8px 12px;background:#10b981;color:white;border:none;border-radius:6px;font-weight:600;cursor:pointer;">' +
+          '\u5B8C\u6210 \u2713</button>' +
+          '<button id="' + ID + '_cancel" style="padding:8px 12px;background:#e5e7eb;color:#374151;border:none;border-radius:6px;cursor:pointer;">' +
+          '\u53D6\u6D88</button>' +
+        '</div>'
+      );
+      document.getElementById(ID + '_reason').textContent = reason;
+      document.getElementById(ID + '_done').onclick = () => {
+        el.remove();
+        if (window.humanAssistDone) window.humanAssistDone();
+      };
+      document.getElementById(ID + '_cancel').onclick = () => {
+        el.remove();
+        if (window.humanAssistCancel) window.humanAssistCancel();
+      };
+    });
+  };
+
+  window.__hideAssistOverlay = () => {
+    const el = document.getElementById(ID);
+    if (el) el.remove();
+  };
+})();
+"""
+
+
+class BrowserOverlayGateway(HumanAssistGateway):
+    """Default gateway: yellow overlay injected into the agent's browser window.
+
+    UX: prompt appears as a fixed-position card in top-right of every page.
+    User completes whatever the reason describes, clicks 完成 in the overlay.
+    Click → window.humanAssistDone() (Playwright-exposed) → resolves the
+    Future Python is awaiting.
+
+    Cross-navigation: if user navigates during assist, framenavigated handler
+    re-renders overlay on the new page (init_script ensures __renderAssistOverlay
+    is available on every page).
+
+    Setup is lazy: first request() installs init_script + expose_function on
+    the BrowserContext. If context changes (browser_reset), re-installs
+    automatically.
+    """
+
+    def __init__(self) -> None:
+        self._pending_future: asyncio.Future[HumanResponse] | None = None
+        self._setup_for_context_id: int | None = None
+
+    async def request(
+        self,
+        reason: str,
+        page: Any,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        ctx = page.context
+        await self._ensure_setup(ctx)
+
+        loop = asyncio.get_event_loop()
+        self._pending_future = loop.create_future()
+
+        # Show overlay on current page (best effort)
+        try:
+            await page.evaluate("(r) => window.__renderAssistOverlay(r)", reason)
+        except Exception as e:
+            logger.warning(f"Initial overlay render failed: {e}")
+
+        # Best-effort: re-render on every navigation while still pending
+        async def re_render(frame: Any) -> None:
+            if frame is not page.main_frame:
+                return
+            if not self._pending_future or self._pending_future.done():
+                return
+            try:
+                await page.evaluate("(r) => window.__renderAssistOverlay(r)", reason)
+            except Exception as e:
+                logger.debug(f"Re-render after navigation failed: {e}")
+
+        def on_nav(frame: Any) -> None:
+            asyncio.create_task(re_render(frame))
+
+        page.on("framenavigated", on_nav)
+        logger.info(f"Awaiting human assist (overlay): {reason[:80]}")
+
+        try:
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+
+            if timeout_s is None:
+                response = await self._pending_future
+            else:
+                response = await asyncio.wait_for(self._pending_future, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            logger.warning(f"Overlay assist timed out after {timeout_s}s")
+            response = HumanResponse(status="timeout", message=None)
+        except asyncio.CancelledError:
+            logger.warning("Overlay assist cancelled")
+            response = HumanResponse(status="cancelled", message=None)
+        finally:
+            try:
+                page.remove_listener("framenavigated", on_nav)
+            except Exception:
+                pass
+            try:
+                await page.evaluate("() => window.__hideAssistOverlay && window.__hideAssistOverlay()")
+            except Exception:
+                pass
+            self._pending_future = None
+
+        logger.info(f"Overlay assist {response.status}")
+        return response
+
+    async def _ensure_setup(self, ctx: Any) -> None:
+        """Install init_script + expose_function on the context, idempotent.
+
+        add_init_script applies only to FUTURE page loads — for already-open
+        pages we additionally evaluate the script directly so helpers exist now.
+        """
+        ctx_id = id(ctx)
+        if self._setup_for_context_id == ctx_id:
+            return
+        try:
+            await ctx.add_init_script(_OVERLAY_INIT_JS)
+        except Exception as e:
+            logger.debug(f"add_init_script failed: {e}")
+        try:
+            await ctx.expose_function("humanAssistDone", self._on_done)
+            await ctx.expose_function("humanAssistCancel", self._on_cancel)
+        except Exception as e:
+            # expose_function raises if name already taken on this context.
+            # Persistent profile doesn't carry expose_function bindings across
+            # processes, so this only fires on hot re-setup of same context.
+            logger.debug(f"expose_function partial: {e}")
+        # Apply helpers to already-open pages (init_script is future-only)
+        for existing in list(getattr(ctx, "pages", []) or []):
+            try:
+                await existing.evaluate(_OVERLAY_INIT_JS)
+            except Exception as e:
+                logger.debug(f"inject into existing page failed: {e}")
+        self._setup_for_context_id = ctx_id
+
+    def _on_done(self) -> None:
+        if self._pending_future and not self._pending_future.done():
+            self._pending_future.set_result(HumanResponse(status="completed"))
+
+    def _on_cancel(self) -> None:
+        if self._pending_future and not self._pending_future.done():
+            self._pending_future.set_result(HumanResponse(status="cancelled"))

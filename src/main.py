@@ -22,7 +22,7 @@ from src.config import Config
 from src.llm.client import LLMClient
 from src.planner.recon_planner import ReconPlanner
 from src.recording.agent import RecordingAgent
-from src.runtime.human_assist import TerminalGateway
+from src.runtime.human_assist import BrowserOverlayGateway
 from src.utils.logging import setup, get_logger
 from src.world_model import db
 
@@ -58,13 +58,11 @@ async def run(domain: str, requirement: str) -> None:
     logger.info("Database connected")
 
     browser_manager = BrowserManager(domain=domain)
+    # Set gateway BEFORE first launch so it auto-attaches to ctx and survives
+    # any subsequent browser_reset(). Browser-overlay default for headed runs.
+    browser_manager.gateway = BrowserOverlayGateway()
     ctx = await browser_manager.launch()
-    logger.info("Browser launched")
-
-    # Wire human_assist gateway — terminal-based for MVP, signal file under
-    # the domain's workspace dir so multiple domains don't collide.
-    ctx.human_assist = TerminalGateway(signal_dir=artifacts / "workspace")
-    logger.info(f"Human assist gateway ready (signal: {ctx.human_assist.signal_file})")
+    logger.info("Browser launched, human_assist gateway = BrowserOverlay")
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")

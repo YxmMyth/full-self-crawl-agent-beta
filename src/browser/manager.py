@@ -48,6 +48,9 @@ class BrowserManager:
         self._headed: bool = True
         self._proxy: str | None = None
         self.ctx: ToolContext | None = None
+        # Gateway is set by main.py once; auto-attached to ctx on every launch
+        # so browser_reset doesn't lose the assist channel.
+        self.gateway: Any = None
 
     @property
     def profile_dir(self) -> Path:
@@ -109,6 +112,9 @@ class BrowserManager:
             )
 
         self.ctx = ToolContext(pw_context=pw_context, tabs=[page])
+        # Re-attach human_assist gateway across launches/resets
+        if self.gateway is not None:
+            self.ctx.human_assist = self.gateway
 
         self.ctx.setup_new_tab_listener()
         setup_network_capture(page, self.ctx)
