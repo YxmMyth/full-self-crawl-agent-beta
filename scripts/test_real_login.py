@@ -82,7 +82,7 @@ async def main() -> None:
     setup(level="INFO")
 
     from src.browser.manager import BrowserManager
-    from src.runtime.human_assist import TerminalGateway
+    from src.runtime.human_assist import TkinterPopupGateway
     from src.agent.tools import human_assist as ha_tool
     from src.config import Config
 
@@ -103,9 +103,9 @@ async def main() -> None:
     # ── Phase 1: launch ─────────────────────────────────
     print("\n[Phase 1] Launch BrowserManager + wire human_assist gateway")
     bm = BrowserManager(domain=domain)
+    bm.gateway = TkinterPopupGateway()
     ctx = await bm.launch()
-    ctx.human_assist = TerminalGateway(signal_dir=workspace)
-    print(f"  ✓ browser up, gateway wired")
+    print(f"  ✓ browser up, gateway = TkinterPopupGateway (always-on-top dialog)")
 
     # ── Phase 2: navigate ──────────────────────────────
     print(f"\n[Phase 2] Navigate to landing page first to check current state")
@@ -136,8 +136,9 @@ async def main() -> None:
             ctx,
             reason=(
                 f"请在浏览器窗口完成 {domain} 的登录(账密 / OAuth 都可以)。\n"
-                f"  完成后回到这个终端按 Enter。\n"
-                f"  如果遇到 2FA / 邮箱验证码,在浏览器里处理完再按 Enter。"
+                f"完成后点这个对话框下方的 [完成 ✓]。\n"
+                f"如果遇到 2FA / 邮箱验证码 / Cloudflare 挑战,都在浏览器里处理完再点完成。\n"
+                f"如果搞不定或不想登,点 [跳过] 让 agent 跳过这个 session。"
             ),
         )
         print(f"\n  tool returned: status={result.get('status')}")
