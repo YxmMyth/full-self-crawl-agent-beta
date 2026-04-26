@@ -402,3 +402,126 @@ class BrowserOverlayGateway(HumanAssistGateway):
     def _on_cancel(self) -> None:
         if self._pending_future and not self._pending_future.done():
             self._pending_future.set_result(HumanResponse(status="cancelled"))
+
+
+# ── Tkinter desktop popup gateway (default) ──────────────────────────
+
+
+def _show_tk_popup_blocking(reason: str) -> str:
+    """Modal Tk dialog, always-on-top. Runs in an executor thread.
+
+    Returns "completed" on 完成 click, "cancelled" on 跳过 / window close.
+    """
+    import tkinter as tk
+
+    result = {"value": "cancelled"}  # default if user closes via X
+
+    root = tk.Tk()
+    root.title("Recon Agent — 需要你介入")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+
+    body = tk.Frame(root, padx=24, pady=20)
+    body.pack()
+
+    tk.Label(
+        body,
+        text="⏸  HUMAN ASSIST NEEDED",
+        font=("Microsoft YaHei UI", 11, "bold"),
+        fg="#92400e",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        body,
+        text=reason,
+        font=("Microsoft YaHei UI", 10),
+        wraplength=400,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(0, 16))
+
+    btns = tk.Frame(body)
+    btns.pack(anchor="center")
+
+    def on_done():
+        result["value"] = "completed"
+        root.quit()
+        root.destroy()
+
+    def on_skip():
+        result["value"] = "cancelled"
+        root.quit()
+        root.destroy()
+
+    tk.Button(
+        btns, text="完成 ✓", command=on_done, width=12, height=1,
+        font=("Microsoft YaHei UI", 10, "bold"),
+    ).pack(side=tk.LEFT, padx=6)
+    tk.Button(
+        btns, text="跳过", command=on_skip, width=12, height=1,
+        font=("Microsoft YaHei UI", 10),
+    ).pack(side=tk.LEFT, padx=6)
+
+    # Center on screen
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 3}")
+
+    root.protocol("WM_DELETE_WINDOW", on_skip)
+    root.bind("<Escape>", lambda e: on_skip())
+    root.lift()
+    root.focus_force()
+
+    root.mainloop()
+    return result["value"]
+
+
+class TkinterPopupGateway(HumanAssistGateway):
+    """Always-on-top desktop dialog with 完成 / 跳过 buttons.
+
+    Default gateway. Works regardless of which app the user is looking at —
+    Tk dialog floats above all windows. User reads reason → switches to
+    browser to handle (login/CAPTCHA/etc) → returns to dialog → clicks 完成.
+
+    No browser dependency — works even if Camoufox/Chromium isn't running
+    (useful if agent has crashed before browser launch and needs help).
+
+    Tradeoff vs BrowserOverlay: requires user to switch focus between dialog
+    and browser. Pro: visible from anywhere; con: extra context switches.
+    """
+
+    async def request(
+        self,
+        reason: str,
+        page: Any,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        # Best-effort: also try to surface the browser so user knows where to go.
+        # No-op if it fails (Windows focus-stealing, headless, etc).
+        try:
+            if page is not None:
+                await page.bring_to_front()
+        except Exception:
+            pass
+
+        logger.info(f"Awaiting human assist (popup): {reason[:80]}")
+
+        loop = asyncio.get_event_loop()
+        try:
+            if timeout_s is None:
+                status = await loop.run_in_executor(None, _show_tk_popup_blocking, reason)
+            else:
+                status = await asyncio.wait_for(
+                    loop.run_in_executor(None, _show_tk_popup_blocking, reason),
+                    timeout=timeout_s,
+                )
+            response = HumanResponse(status=status)
+        except asyncio.TimeoutError:
+            logger.warning(f"Popup assist timed out after {timeout_s}s")
+            response = HumanResponse(status="timeout")
+        except asyncio.CancelledError:
+            logger.warning("Popup assist cancelled")
+            response = HumanResponse(status="cancelled")
+
+        logger.info(f"Popup assist {response.status}")
+        return response

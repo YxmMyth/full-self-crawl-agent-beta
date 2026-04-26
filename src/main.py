@@ -22,7 +22,7 @@ from src.config import Config
 from src.llm.client import LLMClient
 from src.planner.recon_planner import ReconPlanner
 from src.recording.agent import RecordingAgent
-from src.runtime.human_assist import BrowserOverlayGateway
+from src.runtime.human_assist import TkinterPopupGateway
 from src.utils.logging import setup, get_logger
 from src.world_model import db
 
@@ -59,10 +59,11 @@ async def run(domain: str, requirement: str) -> None:
 
     browser_manager = BrowserManager(domain=domain)
     # Set gateway BEFORE first launch so it auto-attaches to ctx and survives
-    # any subsequent browser_reset(). Browser-overlay default for headed runs.
-    browser_manager.gateway = BrowserOverlayGateway()
+    # any subsequent browser_reset(). Tkinter desktop popup is the default —
+    # always-on-top regardless of which app the user is currently looking at.
+    browser_manager.gateway = TkinterPopupGateway()
     ctx = await browser_manager.launch()
-    logger.info("Browser launched, human_assist gateway = BrowserOverlay")
+    logger.info("Browser launched, human_assist gateway = TkinterPopup")
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")

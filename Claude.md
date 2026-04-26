@@ -410,9 +410,13 @@ Execution Agent
 
 **失败模式:三状态 enum** —— `completed`/`cancelled`/`timeout`。Runtime 不替 agent 决策恢复路径。
 
-**MVP 实现(默认):** **BrowserOverlayGateway** —— 通过 `add_init_script` + `expose_function` 在每个页面注入一个右上角浮层卡片(reason + 完成/取消按钮)。`framenavigated` 监听导航,自动在新页面重新渲染浮层。点击"完成" → `window.humanAssistDone()` 经 Playwright 桥回调 Python,解锁等待中的 Future。本地 headed 跑最自然,视线焦点本来就在浏览器上。
+**MVP 实现(默认):** **TkinterPopupGateway** —— 弹出 OS 级永远置顶对话框(reason + 完成/跳过按钮)。Tk 对话框漂浮在所有应用之上,用户在任何 app 里都能看见,不依赖浏览器是否在前台。点击 "完成" → asyncio.Future 解锁,agent 继续。Tkinter 来自 Python 标准库,**零依赖**。
 
-**备选:** `TerminalGateway`(终端 print + 信号文件 / stdin Enter),保留作为无头部署 / 测试 / 兜底场景。`src/runtime/human_assist.py` 内同时存在,main.py 切换 `browser_manager.gateway = ...` 即可换实现。
+**备选(代码同时保留,切换主要在 main.py 一行):**
+- `BrowserOverlayGateway` —— 浏览器内浮层(`add_init_script` 注入右上角黄色卡片 + Playwright `expose_function` 桥接按钮点击)。视线已在浏览器时最自然,但用户切走就看不到。
+- `TerminalGateway` —— 终端 print + 信号文件 / stdin Enter,适合无头部署 / 自动化测试。
+
+切换默认: `browser_manager.gateway = XxxGateway()`(在 main.py)。
 
 **Per-domain profile:** `artifacts/_profiles/{domain}/`,跨 run 持久化。第一次手动登录后 cookies 永久带着,无需每次重登。
 
