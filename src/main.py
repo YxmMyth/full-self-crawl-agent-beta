@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Ensure project root on sys.path so `python src/main.py` works the same as
+# `python -m src.main`.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from src.agent.tools.registry import ToolRegistry
 from src.agent.tools import (

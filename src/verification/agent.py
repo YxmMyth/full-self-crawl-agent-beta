@@ -2,7 +2,14 @@
 
 Triggered inside mark_done (not by Planner directly).
 Feature-gated via VERIFICATION_SUBAGENT_ENABLED.
-3 tools: read_world_model, bash, think. Read-only + execute.
+
+4 tools:
+  - read_world_model, bash, think (investigation)
+  - submit_verdict (terminal — only way to end the loop)
+
+The submit_verdict tool is the explicit termination signal. This avoids the
+"exploration vs conclusion" mode-switch failure mode where free-text VERDICT
+formatting gets forgotten while the agent keeps calling investigation tools.
 
 See: docs/工具重新设计共识.md §2.2c, docs/SystemPrompts设计.md §四
 """
@@ -10,7 +17,6 @@ See: docs/工具重新设计共识.md §2.2c, docs/SystemPrompts设计.md §四
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +31,7 @@ _SYSTEM_PROMPT = """You are a verification specialist. Your job is to check whet
 reconnaissance is truly complete — or whether the planner is \
 stopping too early.
 
-You have 3 tools: read_world_model, bash, think.
+You have 4 tools: read_world_model, bash, think, submit_verdict.
 
 ## What to Check
 
@@ -56,17 +62,20 @@ You have 3 tools: read_world_model, bash, think.
 - Focus on WHAT'S MISSING, not what's there.
 - When in doubt, FAIL. One more session costs less than incomplete results.
 
-## Output
+## How to terminate
 
-For each gap found, state it clearly.
+There is NO "natural stop". You MUST call `submit_verdict` to terminate.
 
-Last line (parsed by code):
-VERDICT: PASS
-VERDICT: FAIL
-VERDICT: PARTIAL"""
+Typical flow: 3-6 rounds of read_world_model / bash / think to gather \
+evidence, then `submit_verdict(verdict, gaps, evidence)`.
 
-# Counter for verification rounds (report filenames)
-_verification_round = 0
+- PASS: requirement satisfied, no blocking gaps.
+- FAIL: significant gaps; one or more new sessions are needed.
+- PARTIAL: gaps exist but core deliverables are acceptable.
+
+When you are about to write 'VERDICT:' as text — STOP and call submit_verdict instead. \
+Plain text verdicts are not parsed."""
+
 
 # Tool schemas
 _TOOLS_SCHEMA = [
@@ -112,7 +121,52 @@ _TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_verdict",
+            "description": (
+                "Terminate verification with your final judgment. "
+                "This is the ONLY way to end the verification round — "
+                "without calling this, the loop continues until max_rounds is hit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["PASS", "FAIL", "PARTIAL"],
+                        "description": (
+                            "PASS: requirement met, no blocking gaps. "
+                            "FAIL: significant gaps require more sessions. "
+                            "PARTIAL: minor gaps but core deliverables acceptable."
+                        ),
+                    },
+                    "gaps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Specific missing pieces, one per item. "
+                            "Required for FAIL/PARTIAL. Empty list for PASS."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "Brief summary of what you actually verified — "
+                            "reference specific files, Model sections, counts. "
+                            "Supports your verdict."
+                        ),
+                    },
+                },
+                "required": ["verdict", "gaps", "evidence"],
+            },
+        },
+    },
 ]
+
+# Counter for verification rounds (report filenames)
+_verification_round = 0
 
 
 async def run_verification(
@@ -124,20 +178,19 @@ async def run_verification(
     """Run the Verification Subagent.
 
     Returns:
-        (verdict, gaps) — verdict is 'PASS', 'FAIL', or 'PARTIAL'.
-        gaps is the full verification report text.
+        (verdict, feedback) — verdict is 'PASS', 'FAIL', or 'PARTIAL'.
+        feedback is human-readable text (gaps + evidence) the Planner can
+        feed back to itself for the next iteration.
     """
     global _verification_round
     _verification_round += 1
     round_num = _verification_round
 
-    # Load current models for context
     semantic, procedural = await db.load_both_models(domain)
 
     workspace = Config.artifacts_for(domain) / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # User message with all context
     user_msg = (
         f"## Requirement\n{requirement}\n\n"
         f"## Planner's reason for stopping\n{mark_done_reason}\n\n"
@@ -152,85 +205,157 @@ async def run_verification(
         {"role": "user", "content": user_msg},
     ]
 
-    max_rounds = 10
-    final_content = ""
+    max_rounds = 12
+    reasoning_chain: list[str] = []
+    final_verdict: str | None = None
+    final_gaps: list[str] = []
+    final_evidence: str = ""
+    nudged = False
 
-    for _ in range(max_rounds):
+    for round_idx in range(max_rounds):
         response = await llm.chat_with_tools(messages, _TOOLS_SCHEMA)
         if response is None:
+            logger.warning(f"Verification round {round_num}: LLM returned None at round {round_idx + 1}")
             break
+
+        if response.content:
+            reasoning_chain.append(f"[round {round_idx + 1}]\n{response.content}")
 
         assistant_msg: dict[str, Any] = {"role": "assistant"}
         if response.content:
             assistant_msg["content"] = response.content
-            final_content = response.content
         if response.tool_calls:
             assistant_msg["tool_calls"] = [
                 {"id": tc.id, "type": "function",
                  "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
                 for tc in response.tool_calls
             ]
+        # OpenAI requires content or tool_calls — if neither, skip this turn
+        if "content" not in assistant_msg and "tool_calls" not in assistant_msg:
+            logger.warning(f"Verification round {round_num}: empty response at round {round_idx + 1}")
+            break
         messages.append(assistant_msg)
 
+        # Agent stopped without calling submit_verdict — nudge once, then break
         if not response.tool_calls:
+            if not nudged:
+                logger.info(f"Verification round {round_num}: agent stopped without submit_verdict, nudging")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You stopped without calling submit_verdict. The verification "
+                        "round MUST end via submit_verdict. Either continue investigating "
+                        "(read_world_model / bash / think) or call submit_verdict NOW."
+                    ),
+                })
+                nudged = True
+                continue
+            logger.warning(f"Verification round {round_num}: agent stopped twice without verdict, breaking")
             break
 
+        # Process all tool calls; capture submit_verdict if present
+        submit_called = False
         for tc in response.tool_calls:
-            if tc.name == "read_world_model":
+            if tc.name == "submit_verdict":
+                args = tc.arguments or {}
+                v = (args.get("verdict") or "").upper()
+                if v in ("PASS", "FAIL", "PARTIAL"):
+                    final_verdict = v
+                    raw_gaps = args.get("gaps") or []
+                    final_gaps = [str(g) for g in raw_gaps if str(g).strip()]
+                    final_evidence = str(args.get("evidence") or "").strip()
+                    submit_called = True
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": "Verdict accepted. Verification round ending.",
+                    })
+                else:
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": (
+                            f"Invalid verdict '{v}'. Must be PASS, FAIL, or PARTIAL. "
+                            f"Call submit_verdict again with a valid value."
+                        ),
+                    })
+            elif tc.name == "read_world_model":
                 from src.agent.tools.read_wm import handle as wm_handle
-
                 class _Ctx:
                     _domain = domain
-                result = await wm_handle(_Ctx(), **tc.arguments)
-            elif tc.name == "bash":
-                import asyncio
                 try:
-                    proc = await asyncio.create_subprocess_shell(
+                    result = await wm_handle(_Ctx(), **tc.arguments)
+                except Exception as e:
+                    result = f"Error: {e}"
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+            elif tc.name == "bash":
+                import asyncio as _asyncio
+                try:
+                    proc = await _asyncio.create_subprocess_shell(
                         tc.arguments.get("command", ""),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
+                        stdout=_asyncio.subprocess.PIPE,
+                        stderr=_asyncio.subprocess.STDOUT,
                         cwd=str(workspace),
                     )
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=30)
                     result = f"{stdout.decode('utf-8', errors='replace')}\n[exit code: {proc.returncode}]"
                 except Exception as e:
                     result = f"Error: {e}"
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
             elif tc.name == "think":
                 result = tc.arguments.get("thought", "")
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
             else:
-                result = f"Unknown tool: {tc.name}"
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "content": f"Unknown tool: {tc.name}",
+                })
 
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+        if submit_called:
+            break
 
-    # Parse verdict from last line
-    verdict = _parse_verdict(final_content)
+    # Decide final verdict
+    if final_verdict is None:
+        # NO_VERDICT — never called submit_verdict in max_rounds.
+        # Treat as FAIL for caller (so Planner re-tries) but log distinctly.
+        logger.warning(
+            f"Verification round {round_num}: NO_VERDICT — agent never called "
+            f"submit_verdict in {max_rounds} rounds. Treating as FAIL."
+        )
+        verdict = "FAIL"
+        final_gaps = ["Verification agent did not produce a verdict (loop exhausted)."]
+        final_evidence = "(no evidence produced)"
+    else:
+        verdict = final_verdict
+        logger.info(f"Verification round {round_num}: {verdict}")
 
-    # Save verification report
+    # Build the report
+    report_parts = [
+        f"# Verification Round {round_num}",
+        "",
+        f"**Verdict:** {verdict}",
+        "",
+    ]
+    if final_evidence:
+        report_parts += ["## Evidence", "", final_evidence, ""]
+    if final_gaps:
+        report_parts += ["## Gaps", ""]
+        report_parts += [f"- {g}" for g in final_gaps]
+        report_parts += [""]
+    if reasoning_chain:
+        report_parts += ["## Reasoning Chain", "", "\n\n---\n\n".join(reasoning_chain), ""]
+
+    report_text = "\n".join(report_parts)
     ver_dir = Config.artifacts_for(domain) / "verification"
     ver_dir.mkdir(parents=True, exist_ok=True)
-    report_path = ver_dir / f"round_{round_num}.md"
-    report_path.write_text(final_content or "(no report)", encoding="utf-8")
+    (ver_dir / f"round_{round_num}.md").write_text(report_text, encoding="utf-8")
 
-    logger.info(
-        f"Verification round {round_num}: {verdict}",
-        extra={"domain": domain},
-    )
+    # Build feedback for Planner
+    feedback_parts = [f"Verification {verdict}."]
+    if final_gaps:
+        feedback_parts.append("Gaps to address:")
+        for g in final_gaps:
+            feedback_parts.append(f"- {g}")
+    if final_evidence:
+        feedback_parts.append(f"Evidence reviewed: {final_evidence}")
+    feedback = "\n".join(feedback_parts)
 
-    return verdict, final_content
-
-
-def _parse_verdict(text: str) -> str:
-    """Extract VERDICT from the last lines of the verification report."""
-    if not text:
-        return "FAIL"
-
-    for line in reversed(text.strip().split("\n")):
-        line = line.strip()
-        if line.startswith("VERDICT:"):
-            verdict = line.split(":", 1)[1].strip().upper()
-            if verdict in ("PASS", "FAIL", "PARTIAL"):
-                return verdict
-
-    # No verdict found — default to FAIL (err on the side of caution)
-    logger.warning("No VERDICT line found in verification report, defaulting to FAIL")
-    return "FAIL"
+    return verdict, feedback
