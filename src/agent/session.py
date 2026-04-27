@@ -80,6 +80,8 @@ Most agents fail because they stop at Layer 1.
   Layer 1 — INDEX
     Lists, catalogs, search results, sitemaps, category pages, API listing endpoints.
     Each row is a POINTER to an entity: name + summary + IDs/URLs/file refs.
+    For new domains, check `/sitemap.xml` and `/robots.txt` first — they often \
+expose the entire URL inventory and API hints in one curl, much faster than crawling.
 
   Layer 2 — ENTITY
     The detail page for ONE thing: /products/{slug}, /article/{id}, etc.
