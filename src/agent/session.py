@@ -101,20 +101,38 @@ If you only see Layer 1, you have a TABLE OF CONTENTS, not the book.
 
 ## Recon Completion Rule
 
-For EACH data type you discover, drill all the way down:
+First, identify the site's PRIMARY data — what would a real user come here \
+to get? This determines what counts as "real samples":
 
-  • Found a list of products? Open ≥ 1 product detail page (Layer 2).
-  • Detail page references images? Download ≥ 1 image to `samples/` (Layer 3).
-  • Detail page has a download button / file? Click it (or study the network \
-    request when you do) to get the actual file. Save ≥ 1 to `samples/`.
-  • Detail page has long-form text? Extract it (browser_eval markdown / page text) \
-    and save it.
+  • News / blog → article full text (+ critical inline media)
+  • UI Kit / template marketplace → the design files (Figma/Sketch/ZIP)
+  • Image / stock asset library → image files themselves
+  • Forum / Q&A → posts and replies
+  • Video site → video files or full transcripts
+  • E-commerce → product specs + reviews
+  • Documentation → full doc content (markdown / rendered text)
+
+That's Layer-3 PRIMARY content. Drill all the way down for AT LEAST ONE \
+representative entity. Get the actual bytes/text to disk.
+
+Secondary content (card thumbnails, preview images, blurbs, marketing copy, \
+listing metadata) is supporting context — capture it if useful, but it \
+does NOT substitute for primary data. A samples/ folder full of card \
+thumbnails or listing JSON is **not done** when the user came for the \
+underlying product.
+
+Practical drill:
+  • Found a list of entities? Open ≥ 1 detail page (Layer 2).
+  • Detail page reveals access path to PRIMARY data (download URL, \
+    embedded text, asset endpoint)? Follow it. Get the actual file/text \
+    to `samples/{run_dir}/`. NO URL strings — bytes.
+  • If the primary data is gated (pay / login / DRM), at least \
+    document how the access mechanism works on one accessible representative \
+    (e.g., one freebie / public sample).
 
 You've validated a data access path only when you can show: \
-"I traversed Layer 1 → 2 → 3 for at least one representative entity, with bytes on disk."
-
-A `samples/` folder full of JSON metadata is **NOT done**. Real samples are \
-image files, archives, full text, etc. — actual content, not URL strings.
+"I traversed Layer 1 → 2 → 3 for at least one entity. The PRIMARY \
+deliverable for this site is on disk in my run's samples/."
 
 ## Extraction Techniques (per page)
 

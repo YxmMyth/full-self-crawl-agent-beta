@@ -46,18 +46,26 @@ You have 4 tools: read_world_model, bash, think, submit_verdict.
    or "quantity unknown"? Are there obvious follow-up paths that \
    were discovered but never investigated?
 
-3. REAL SAMPLES, NOT METADATA RECORDS.
-   For each data type discovered, there must be at least one Layer-3 sample \
-   on disk (actual image bytes, archive files, extracted full text) — NOT \
-   just JSON listings of pointers/URLs.
+3. PRIMARY DATA SAMPLED (not just thumbnails / metadata).
+   First identify what this site's PRIMARY data is — what a real user comes \
+   here to get:
+     - News → article full text
+     - UI Kit market → design files (Figma/Sketch/ZIP)
+     - Image library → image files themselves
+     - Forum → posts + replies
+     - Video → video file / transcript
+     - E-commerce → product specs + reviews
+     - Documentation → full doc text
+   The samples/ folder must have at least ONE Layer-3 sample of the PRIMARY \
+   data on disk. Card thumbnails, preview marketing images, listing JSON \
+   are NOT primary data for most sites — they're presentation/index layer.
    Use bash to inspect:
-     - List file types: `ls -la samples/` and `file samples/*` if available
-     - Spot-check sizes: large binaries (>50KB images, archives) = real content
-       Tiny files (<1KB) often = broken save_as or just URL strings
-     - JSON files containing only `{name, slug, url}` arrays = INDEX records,
-       not Layer-3 content. The mission needed to follow URLs and save bytes.
-   A samples/ folder full of metadata-only JSON is INCOMPLETE. FAIL with a
-   gap saying which data types have no real-bytes sample.
+     - `ls -la samples/` then `file samples/*` to identify file types
+     - Cross-reference with the site's purpose: are the actual user \
+       deliverables there, or just supporting metadata?
+   If samples are all card_image.png + listing.json but the site is a \
+   marketplace where users download Figma files, that's INCOMPLETE — \
+   FAIL with a gap stating which primary data type has no real sample.
 
 4. DEPTH VS SURFACE.
    Did the system actually understand the data, or just list pages? \
