@@ -30,8 +30,13 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-LEGACY_RUN_ID = f"legacy_{time.strftime('%Y%m%d', time.localtime())}"
-PER_RUN_SUBDIRS = {"samples", "sessions", "verification", "research", "workspace", "transcripts"}
+# Per-domain legacy id avoids the cross-domain "same string" confusion.
+# Legacy id is generated per-domain in fix_filesystem(), not used here.
+LEGACY_DATE = time.strftime("%Y%m%d", time.localtime())
+
+# Use a denylist (skip these), not allowlist — anything not `runs/` and
+# not a `_*` utility dir gets moved into the legacy run dir.
+SKIP_TOP_LEVEL = {"runs"}
 
 
 async def migrate_db() -> None:
@@ -74,18 +79,68 @@ async def migrate_db() -> None:
         else:
             print("[db] models.run_id already exists")
 
-        # Backfill all NULL/empty run_id with LEGACY_RUN_ID
-        for table in ("observations", "locations", "sessions", "models"):
-            n = await conn.fetchval(f"""
-                SELECT COUNT(*) FROM {table}
-                WHERE run_id IS NULL OR run_id = ''
-            """)
-            if n:
-                print(f"[db] backfilling {n} rows in {table} → run_id={LEGACY_RUN_ID}")
-                await conn.execute(
-                    f"UPDATE {table} SET run_id = $1 WHERE run_id IS NULL OR run_id = ''",
-                    LEGACY_RUN_ID,
-                )
+        # Backfill NULL/empty run_id with per-domain legacy ids.
+        # observations/locations: tied to a domain via locations table.
+        # models: domain is in the row directly.
+        # sessions: no domain column — best effort: leave NULL or use a generic legacy id.
+
+        # Backfill locations first (used by JOIN below)
+        domains_loc = await conn.fetch("""
+            SELECT DISTINCT domain FROM locations
+            WHERE run_id IS NULL OR run_id = ''
+        """)
+        for r in domains_loc:
+            domain = r["domain"]
+            new_id = f"legacy_{domain}_{LEGACY_DATE}"
+            n = await conn.fetchval("""
+                UPDATE locations SET run_id = $1
+                WHERE (run_id IS NULL OR run_id = '') AND domain = $2
+                RETURNING (SELECT COUNT(*) FROM locations WHERE run_id = $1 AND domain = $2)
+            """, new_id, domain)
+            print(f"[db] locations({domain}): backfilled run_id={new_id}")
+
+        # Backfill observations via locations.domain
+        domains_obs = await conn.fetch("""
+            SELECT DISTINCT l.domain FROM observations o
+            JOIN locations l ON o.location_id = l.id
+            WHERE o.run_id IS NULL OR o.run_id = ''
+        """)
+        for r in domains_obs:
+            domain = r["domain"]
+            new_id = f"legacy_{domain}_{LEGACY_DATE}"
+            await conn.execute("""
+                UPDATE observations SET run_id = $1
+                WHERE (run_id IS NULL OR run_id = '')
+                  AND location_id IN (SELECT id FROM locations WHERE domain = $2)
+            """, new_id, domain)
+            print(f"[db] observations({domain}): backfilled run_id={new_id}")
+
+        # Backfill models (has domain column directly)
+        domains_models = await conn.fetch("""
+            SELECT DISTINCT domain FROM models
+            WHERE run_id IS NULL OR run_id = ''
+        """)
+        for r in domains_models:
+            domain = r["domain"]
+            new_id = f"legacy_{domain}_{LEGACY_DATE}"
+            await conn.execute("""
+                UPDATE models SET run_id = $1
+                WHERE (run_id IS NULL OR run_id = '') AND domain = $2
+            """, new_id, domain)
+            print(f"[db] models({domain}): backfilled run_id={new_id}")
+
+        # Sessions: no domain column. Use generic legacy id, will be orphaned but
+        # not catastrophic — sessions are mainly for trace lookup, not Model logic.
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM sessions WHERE run_id IS NULL OR run_id = ''"
+        )
+        if n:
+            generic = f"legacy_unknown_{LEGACY_DATE}"
+            await conn.execute(
+                "UPDATE sessions SET run_id = $1 WHERE run_id IS NULL OR run_id = ''",
+                generic,
+            )
+            print(f"[db] sessions: backfilled {n} rows with generic run_id={generic}")
 
     await pool.close()
 
@@ -104,24 +159,25 @@ def migrate_filesystem() -> None:
             continue
 
         domain = entry.name
+        legacy_run_id = f"legacy_{domain}_{LEGACY_DATE}"
         runs_dir = entry / "runs"
-        legacy_target = runs_dir / LEGACY_RUN_ID
+        legacy_target = runs_dir / legacy_run_id
 
-        # Find any per-run subdirs at the top level
-        present = [p for p in entry.iterdir() if p.is_dir() and p.name in PER_RUN_SUBDIRS]
-        if not present:
+        # Move EVERYTHING at top level except `runs/` itself
+        movable = [p for p in entry.iterdir() if p.is_dir() and p.name not in SKIP_TOP_LEVEL]
+        if not movable:
             print(f"[fs] {domain}: nothing to migrate")
             continue
 
         legacy_target.mkdir(parents=True, exist_ok=True)
-        for sub in present:
+        for sub in movable:
             dst = legacy_target / sub.name
             if dst.exists():
-                print(f"[fs] {domain}/{sub.name}: already present at runs/{LEGACY_RUN_ID}/, skip")
+                print(f"[fs] {domain}/{sub.name}: already present at runs/{legacy_run_id}/, skip")
                 continue
             try:
                 shutil.move(str(sub), str(dst))
-                print(f"[fs] {domain}: moved {sub.name}/ → runs/{LEGACY_RUN_ID}/{sub.name}/")
+                print(f"[fs] {domain}: moved {sub.name}/ → runs/{legacy_run_id}/{sub.name}/")
             except Exception as e:
                 print(f"[fs] {domain}/{sub.name}: move failed: {e}")
 
