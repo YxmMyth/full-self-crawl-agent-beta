@@ -77,7 +77,14 @@ async def create_location(
     run_id: str | None = None,
     how_to_reach: str | None = None,
 ) -> Location:
-    """Create a new location. ID = domain::pattern."""
+    """Create a new location. ID = domain::pattern.
+
+    run_id defaults to Config.RUN_ID if unset (for backward compat with
+    callers that don't pass it).
+    """
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or None
     pool = _get_pool()
     loc_id = f"{domain}::{pattern}"
     now = datetime.now(timezone.utc)
@@ -163,19 +170,27 @@ async def create_observation(
     location_id: str,
     raw: dict[str, Any],
     agent_step: int | None = None,
+    run_id: str | None = None,
 ) -> Observation:
-    """Create a new observation linked to a location."""
+    """Create a new observation linked to a location.
+
+    run_id defaults to Config.RUN_ID. Pass explicit None to skip tagging
+    (only useful for migration / system-level writes).
+    """
     pool = _get_pool()
     raw_json = json.dumps(raw, ensure_ascii=False)
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or None
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO observations (location_id, agent_step, raw)
-            VALUES ($1, $2, $3::jsonb)
+            INSERT INTO observations (location_id, run_id, agent_step, raw)
+            VALUES ($1, $2, $3, $4::jsonb)
             RETURNING id, created_at
             """,
-            location_id, agent_step, raw_json,
+            location_id, run_id, agent_step, raw_json,
         )
 
     return Observation(
@@ -207,30 +222,65 @@ async def delete_observation(observation_id: int) -> None:
         )
 
 
-async def list_observations_by_location(location_id: str) -> list[Observation]:
-    """List all observations for a location, ordered by creation time."""
+async def list_observations_by_location(
+    location_id: str,
+    run_id: str | None = None,
+) -> list[Observation]:
+    """List observations for a location, ordered by creation time.
+
+    Default scope: current run (Config.RUN_ID). Pass run_id="*" to include
+    observations from all runs. Pass explicit run_id to read another run's.
+    """
     pool = _get_pool()
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or "*"
+
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM observations WHERE location_id = $1 ORDER BY created_at",
-            location_id,
-        )
+        if run_id == "*":
+            rows = await conn.fetch(
+                "SELECT * FROM observations WHERE location_id = $1 ORDER BY created_at",
+                location_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM observations WHERE location_id = $1 AND run_id = $2 ORDER BY created_at",
+                location_id, run_id,
+            )
     return [_row_to_observation(r) for r in rows]
 
 
-async def list_observations_by_domain(domain: str) -> list[Observation]:
-    """List all observations for a domain (across all locations)."""
+async def list_observations_by_domain(
+    domain: str,
+    run_id: str | None = None,
+) -> list[Observation]:
+    """List all observations for a domain. Default scope: current run."""
     pool = _get_pool()
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or "*"
+
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT o.* FROM observations o
-            JOIN locations l ON o.location_id = l.id
-            WHERE l.domain = $1
-            ORDER BY o.created_at
-            """,
-            domain,
-        )
+        if run_id == "*":
+            rows = await conn.fetch(
+                """
+                SELECT o.* FROM observations o
+                JOIN locations l ON o.location_id = l.id
+                WHERE l.domain = $1
+                ORDER BY o.created_at
+                """,
+                domain,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT o.* FROM observations o
+                JOIN locations l ON o.location_id = l.id
+                WHERE l.domain = $1 AND o.run_id = $2
+                ORDER BY o.created_at
+                """,
+                domain, run_id,
+            )
     return [_row_to_observation(r) for r in rows]
 
 
@@ -242,7 +292,10 @@ async def create_session(
     run_id: str | None = None,
     direction: str | None = None,
 ) -> Session:
-    """Create a new session record."""
+    """Create a new session record. run_id defaults to Config.RUN_ID."""
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or None
     pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -293,39 +346,95 @@ async def get_session(session_id: str) -> Session | None:
 # ── Models CRUD ──────────────────────────────────────────
 
 
-async def upsert_model(domain: str, model_type: str, content: str) -> None:
-    """Insert or update a model document (semantic or procedural)."""
+async def upsert_model(
+    domain: str,
+    model_type: str,
+    content: str,
+    run_id: str | None = None,
+) -> None:
+    """Insert or update a model document for (domain, model_type, run_id)."""
     pool = _get_pool()
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID
+        if not run_id:
+            raise RuntimeError("upsert_model needs run_id (Config.RUN_ID not set)")
     now = datetime.now(timezone.utc)
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO models (domain, model_type, content, updated_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (domain, model_type) DO UPDATE SET
+            INSERT INTO models (domain, model_type, run_id, content, updated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (domain, model_type, run_id) DO UPDATE SET
                 content = EXCLUDED.content,
                 updated_at = EXCLUDED.updated_at
             """,
-            domain, model_type, content, now,
+            domain, model_type, run_id, content, now,
         )
 
 
-async def load_model(domain: str, model_type: str) -> str:
-    """Load a model document. Returns empty string if not found."""
+async def load_model(
+    domain: str,
+    model_type: str,
+    run_id: str | None = None,
+) -> str:
+    """Load a model document. Default scope: current run."""
     pool = _get_pool()
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID
+        if not run_id:
+            return ""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT content FROM models WHERE domain = $1 AND model_type = $2",
-            domain, model_type,
+            "SELECT content FROM models WHERE domain = $1 AND model_type = $2 AND run_id = $3",
+            domain, model_type, run_id,
         )
     return row["content"] if row else ""
 
 
-async def load_both_models(domain: str) -> tuple[str, str]:
-    """Load both semantic and procedural models. Returns ("", "") if none."""
-    semantic = await load_model(domain, "semantic")
-    procedural = await load_model(domain, "procedural")
+async def load_both_models(
+    domain: str,
+    run_id: str | None = None,
+) -> tuple[str, str]:
+    """Load both semantic and procedural models. Default scope: current run."""
+    semantic = await load_model(domain, "semantic", run_id=run_id)
+    procedural = await load_model(domain, "procedural", run_id=run_id)
     return semantic, procedural
+
+
+async def list_runs(domain: str) -> list[dict[str, Any]]:
+    """List all runs that touched this domain, with last-update times.
+
+    Returns list of {run_id, last_obs_update, has_models} ordered by recency.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(o.run_id, m.run_id) AS run_id,
+                MAX(o.created_at) AS last_obs,
+                COUNT(DISTINCT m.model_type) AS model_count
+            FROM observations o
+            FULL OUTER JOIN models m
+              ON o.run_id = m.run_id AND m.domain = $1
+            JOIN locations l ON o.location_id = l.id
+            WHERE (l.domain = $1 OR m.domain = $1)
+              AND COALESCE(o.run_id, m.run_id) IS NOT NULL
+            GROUP BY COALESCE(o.run_id, m.run_id)
+            ORDER BY MAX(o.created_at) DESC NULLS LAST
+            """,
+            domain,
+        )
+    return [
+        {
+            "run_id": r["run_id"],
+            "last_obs": r["last_obs"],
+            "has_models": (r["model_count"] or 0) > 0,
+        }
+        for r in rows
+    ]
 
 
 # ── Aggregate load ───────────────────────────────────────

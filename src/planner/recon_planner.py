@@ -83,7 +83,12 @@ requirement too early — it biases exploration.
 - PREFER DEPTH OVER BREADTH when the Model has obvious gaps at known \
 locations. Prefer breadth when large parts of the site are unexplored.
 - RESEARCH BEFORE GUESSING. If you don't know the site's technology, \
-spawn_research to find out before sending the execution agent blindly."""
+spawn_research to find out before sending the execution agent blindly.
+- PRIOR RUNS ARE READ-ONLY. Other runs on this domain live at \
+`artifacts/{domain}/runs/*/`. They have their own samples/, sessions/, \
+verification/ etc., and their Models are accessible via \
+read_model(run_id=...). Borrow context if useful, but you write only to \
+your own run; you cannot modify other runs' artifacts."""
 
 
 # ── Tool schemas ─────────────────────────────────────────
@@ -133,11 +138,21 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "read_model",
             "description": (
-                "Read the current Semantic + Procedural Model in full. "
-                "Use when you need the complete picture of what's been discovered. "
-                "Not needed every time — the spawn_execution summary often suffices."
+                "Read the Semantic + Procedural Model. "
+                "No args = current run's Model. "
+                "With run_id = read another run's Model (read-only borrow). "
+                "Find available run_ids by listing artifacts/{domain}/runs/."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Optional. Read another run's Model (read-only).",
+                    },
+                },
+                "required": [],
+            },
         },
     },
     {
@@ -302,7 +317,7 @@ class ReconPlanner:
             elif name == "spawn_research":
                 return await self._spawn_research(args.get("topic", ""), args.get("questions", ""))
             elif name == "read_model":
-                return await self._read_model()
+                return await self._read_model(args.get("run_id"))
             elif name == "think":
                 return json.dumps({"thought": args.get("thought", "")})
             elif name == "mark_done":
@@ -353,9 +368,10 @@ class ReconPlanner:
         result = await run_research(self.llm, self.domain, topic, questions)
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    async def _read_model(self) -> str:
-        semantic, procedural = await db.load_both_models(self.domain)
+    async def _read_model(self, run_id: str | None = None) -> str:
+        semantic, procedural = await db.load_both_models(self.domain, run_id=run_id)
         result = {
+            "run_id": run_id or Config.RUN_ID,
             "semantic_model": semantic or "(empty)",
             "procedural_model": procedural or "(empty)",
         }

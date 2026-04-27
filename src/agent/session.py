@@ -444,8 +444,8 @@ class AgentSession:
     # ── Observability ────────────────────────────────────
 
     def _setup_session_dir(self) -> None:
-        """Create session output directory."""
-        base = Config.artifacts_for(self.domain)
+        """Create session output directory under this run."""
+        base = Config.run_dir(self.domain)
         self.session_dir = base / "sessions" / self.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
         (self.session_dir / "screenshots").mkdir(exist_ok=True)
@@ -519,8 +519,8 @@ class AgentSession:
         if not self.session_dir:
             return
 
-        # Also save to transcripts/ directory
-        transcripts_dir = Config.artifacts_for(self.domain) / "transcripts"
+        # Also save to a flat transcripts/ directory under this run
+        transcripts_dir = Config.run_dir(self.domain) / "transcripts"
         transcripts_dir.mkdir(parents=True, exist_ok=True)
 
         for dest in [self.session_dir / "transcript.jsonl",

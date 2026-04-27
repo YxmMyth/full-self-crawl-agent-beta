@@ -71,7 +71,7 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
     timeout_s = timeout_ms / 1000.0
 
     domain = getattr(ctx, "_domain", "unknown")
-    workspace = Config.artifacts_for(domain) / "workspace"
+    workspace = Config.run_dir(domain) / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     try:

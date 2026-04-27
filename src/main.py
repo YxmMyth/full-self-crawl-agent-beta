@@ -55,10 +55,15 @@ async def run(domain: str, requirement: str) -> None:
     # Validate required config
     Config.require("LLM_API_KEY", "LLM_BASE_URL", "DATABASE_URL")
 
-    # Create artifacts directories
-    artifacts = Config.artifacts_for(domain)
-    for subdir in ["samples", "scripts", "workspace", "transcripts", "research", "verification"]:
-        (artifacts / subdir).mkdir(parents=True, exist_ok=True)
+    # Generate run_id for this mission and create per-run artifacts dir
+    run_id = Config.set_run_id(requirement)
+    run_dir = Config.run_dir(domain)
+    for subdir in ["samples", "sessions", "workspace", "research", "verification"]:
+        (run_dir / subdir).mkdir(parents=True, exist_ok=True)
+    # Record this run's requirement so other runs (and humans) can see why it ran
+    (run_dir / "requirement.txt").write_text(requirement, encoding="utf-8")
+    logger.info(f"Run ID: {run_id}")
+    logger.info(f"Run dir: {run_dir}")
 
     # Initialize components
     await db.connect()

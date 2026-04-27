@@ -196,7 +196,7 @@ async def run_verification(
 
     semantic, procedural = await db.load_both_models(domain)
 
-    workspace = Config.artifacts_for(domain) / "workspace"
+    workspace = Config.run_dir(domain) / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     user_msg = (
@@ -352,7 +352,7 @@ async def run_verification(
         report_parts += ["## Reasoning Chain", "", "\n\n---\n\n".join(reasoning_chain), ""]
 
     report_text = "\n".join(report_parts)
-    ver_dir = Config.artifacts_for(domain) / "verification"
+    ver_dir = Config.run_dir(domain) / "verification"
     ver_dir.mkdir(parents=True, exist_ok=True)
     (ver_dir / f"round_{round_num}.md").write_text(report_text, encoding="utf-8")
 

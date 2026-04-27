@@ -203,9 +203,9 @@ async def run_research(
     Returns:
         {key_findings, report_path}
     """
-    research_dir = Config.artifacts_for(domain) / "research"
+    research_dir = Config.run_dir(domain) / "research"
     research_dir.mkdir(parents=True, exist_ok=True)
-    workspace = Config.artifacts_for(domain) / "workspace"
+    workspace = Config.run_dir(domain) / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Sanitize topic for filename

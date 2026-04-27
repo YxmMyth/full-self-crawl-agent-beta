@@ -15,15 +15,16 @@ from src.world_model import db
 
 TOOL_NAME = "read_world_model"
 TOOL_DESCRIPTION = (
-    "Query the World Model — your accumulated understanding of the site.\n\n"
-    "Two retrieval modes:\n"
-    "- No arguments: returns the Semantic Model (site structure, data relationships, "
-    "requirement mapping) + Procedural Model (working methods, failed approaches, "
-    "navigation patterns). Use this to recall the big picture.\n"
-    "- With location: returns all Observations for that location (detailed evidence). "
-    "Use this to recall specifics about a page/endpoint you've visited.\n\n"
-    "The Models are the index; Observations are the evidence. "
-    "Read the Model first to know where to look, then drill into specific locations."
+    "Query the World Model — accumulated understanding of the site.\n\n"
+    "Modes:\n"
+    "- No arguments: returns the current run's Semantic + Procedural Models.\n"
+    "- With location: returns observations for that location (current run).\n"
+    "- With run_id: read another run's Semantic + Procedural Models (read-only).\n"
+    "  Use this to borrow context from past runs on the same domain. "
+    "When run_id is set, location is ignored — only Models are returned, "
+    "not raw observations.\n\n"
+    "Other runs on this domain are listed at artifacts/{domain}/runs/*/. "
+    "Use bash to ls them and find run_ids worth reading."
 )
 TOOL_PARAMETERS = {
     "type": "object",
@@ -32,7 +33,15 @@ TOOL_PARAMETERS = {
             "type": "string",
             "description": (
                 "Location ID to query (e.g. 'codepen.io::/tag/{tag}'). "
-                "Omit to get the full Semantic + Procedural Model."
+                "Omit to get Semantic + Procedural Model. Ignored when run_id is set."
+            ),
+        },
+        "run_id": {
+            "type": "string",
+            "description": (
+                "Optional. Read Models from another run (read-only borrow). "
+                "Only Models returned, not observations. "
+                "Find available run_ids via `bash ls artifacts/{domain}/runs/`."
             ),
         },
     },
@@ -42,10 +51,29 @@ TOOL_PARAMETERS = {
 
 async def handle(ctx: Any, **kwargs: Any) -> str:
     location = kwargs.get("location")
+    other_run_id = kwargs.get("run_id")
     domain = getattr(ctx, "_domain", None) or ""
 
+    # Cross-run mode: only return Models, no observations
+    if other_run_id:
+        from src.config import Config
+        if other_run_id == Config.RUN_ID:
+            # Same as current run — fall through to default behavior
+            other_run_id = None
+        else:
+            semantic, procedural = await db.load_both_models(domain, run_id=other_run_id)
+            if not semantic and not procedural:
+                return f"No Models found for run_id={other_run_id} on domain {domain}."
+
+            parts = [f"## Models from run: {other_run_id}", "(read-only borrow)\n"]
+            parts.append("### Semantic Model\n")
+            parts.append(semantic or "(empty)")
+            parts.append("\n---\n\n### Procedural Model\n")
+            parts.append(procedural or "(empty)")
+            return "\n".join(parts)
+
     if location:
-        # Retrieve observations for a specific location
+        # Observations for a specific location, current run scope
         observations = await db.list_observations_by_location(location)
         if not observations:
             return f"No observations found for location: {location}"
@@ -59,23 +87,22 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
             lines.append("")
         return "\n".join(lines)
 
+    # Current run's Models
+    semantic, procedural = await db.load_both_models(domain)
+
+    parts = []
+    if semantic:
+        parts.append("## Semantic Model\n")
+        parts.append(semantic)
     else:
-        # Return complete Models
-        semantic, procedural = await db.load_both_models(domain)
+        parts.append("## Semantic Model\n(empty — no sessions completed yet)")
 
-        parts = []
-        if semantic:
-            parts.append("## Semantic Model\n")
-            parts.append(semantic)
-        else:
-            parts.append("## Semantic Model\n(empty — no sessions completed yet)")
+    parts.append("\n\n---\n\n")
 
-        parts.append("\n\n---\n\n")
+    if procedural:
+        parts.append("## Procedural Model\n")
+        parts.append(procedural)
+    else:
+        parts.append("## Procedural Model\n(empty — no sessions completed yet)")
 
-        if procedural:
-            parts.append("## Procedural Model\n")
-            parts.append(procedural)
-        else:
-            parts.append("## Procedural Model\n(empty — no sessions completed yet)")
-
-        return "\n".join(parts)
+    return "\n".join(parts)

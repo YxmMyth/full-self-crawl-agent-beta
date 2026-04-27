@@ -112,7 +112,7 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> str:
 
     # Save to file if requested
     if save_as:
-        artifacts_dir = Config.artifacts_for(domain)
+        artifacts_dir = Config.run_dir(domain)
         save_path = artifacts_dir / save_as
         save_path.parent.mkdir(parents=True, exist_ok=True)
         save_path.write_text(result_str, encoding="utf-8")
@@ -121,7 +121,7 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> str:
 
     # Auto-save large results
     if result_size > _MAX_INLINE:
-        artifacts_dir = Config.artifacts_for(domain)
+        artifacts_dir = Config.run_dir(domain)
         workspace = artifacts_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
 

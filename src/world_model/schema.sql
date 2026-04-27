@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS locations (
 CREATE TABLE IF NOT EXISTS observations (
     id          SERIAL PRIMARY KEY,
     location_id TEXT REFERENCES locations(id) ON DELETE CASCADE,
+    run_id      TEXT,                          -- which run wrote this
     agent_step  INT,
     raw         JSONB NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT NOW()
@@ -40,13 +41,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS models (
     domain      TEXT NOT NULL,
     model_type  TEXT NOT NULL,             -- 'semantic' or 'procedural'
+    run_id      TEXT NOT NULL,             -- per-run model snapshot
     content     TEXT NOT NULL,
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (domain, model_type)
+    PRIMARY KEY (domain, model_type, run_id)
 );
 
 -- ── Indexes ─────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_locations_domain ON locations(domain);
 CREATE INDEX IF NOT EXISTS idx_observations_location ON observations(location_id);
+CREATE INDEX IF NOT EXISTS idx_observations_run ON observations(run_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id);
+CREATE INDEX IF NOT EXISTS idx_models_domain ON models(domain);
