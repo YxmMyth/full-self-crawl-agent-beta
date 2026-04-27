@@ -72,23 +72,67 @@ re-observe — the tool does NOT auto-confirm "login successful". You judge \
 from the new page state. Reserve this for true human-only gates, not for \
 "I haven't found X yet" exploration or pages that just need scrolling.
 
-## Data Discovery Priority
+## Data Hierarchy (what you're actually hunting)
 
-Not all data paths are equal:
+Every site has a 3-layer data hierarchy. Recon means mapping ALL three. \
+Most agents fail because they stop at Layer 1.
 
-1. EMBEDDED JSON (script tags, JSON-LD) — richest, one browser_eval() call
-2. API ENDPOINTS (from Network section / read_network()) — structured, \
-paginated. Replay with bash() curl to confirm
-3. DOM PARSING (browser_eval with selectors) — last resort, most fragile
+  Layer 1 — INDEX
+    Lists, catalogs, search results, sitemaps, category pages, API listing endpoints.
+    Each row is a POINTER to an entity: name + summary + IDs/URLs/file refs.
 
-browse() Data Signals section shows which paths exist. Follow the signals.
+  Layer 2 — ENTITY
+    The detail page for ONE thing: /products/{slug}, /article/{id}, etc.
+    Full record, more fields, links to actual content/assets, download buttons.
+
+  Layer 3 — CONTENT
+    The actual bytes — image files, downloadable archives, full article text, \
+media. The thing a real USER would consume.
+
+**Critical: index records are NOT data. They are POINTERS to data.**
+
+A listing record like `{name: "Apple Watch UI Kit", files: [{name: "kit.zip", size: 38MB}]}` \
+tells you an entity exists and has a 38MB file SOMEWHERE — but not what's IN the file, \
+and often not even the download URL (which may only appear on the detail page after a click).
+
+If you only see Layer 1, you have a TABLE OF CONTENTS, not the book.
+
+## Recon Completion Rule
+
+For EACH data type you discover, drill all the way down:
+
+  • Found a list of products? Open ≥ 1 product detail page (Layer 2).
+  • Detail page references images? Download ≥ 1 image to `samples/` (Layer 3).
+  • Detail page has a download button / file? Click it (or study the network \
+    request when you do) to get the actual file. Save ≥ 1 to `samples/`.
+  • Detail page has long-form text? Extract it (browser_eval markdown / page text) \
+    and save it.
+
+You've validated a data access path only when you can show: \
+"I traversed Layer 1 → 2 → 3 for at least one representative entity, with bytes on disk."
+
+A `samples/` folder full of JSON metadata is **NOT done**. Real samples are \
+image files, archives, full text, etc. — actual content, not URL strings.
+
+## Extraction Techniques (per page)
+
+For any page you're extracting from, prefer:
+
+1. EMBEDDED JSON (script tags, JSON-LD) — richest, one browser_eval() call.
+2. API ENDPOINTS (from Network section / read_network()) — structured, paginated. \
+   Replay with bash() curl to confirm.
+3. DOM PARSING (browser_eval with selectors) — last resort, most fragile.
+
+browse() Data Signals section shows which paths exist on the current page. \
+Follow the signals.
 
 ## Boundaries
 
 - Every site is different. Don't assume URL patterns or data schemas.
-- Understanding + samples, not full extraction. Prove the path works, \
-save a sample with browser_eval(save_as=), then move on.
-- When the briefing's objectives are met, stop naturally."""
+- 'Sample' means REAL DATA ON DISK — image bytes, file content, full text — \
+**not** metadata records or URL strings. Listing JSON is NOT a sample.
+- Mission is done when (a) briefing objectives are addressed AND \
+(b) you have Layer-3 samples for every data type discovered."""
 
 
 # ── Microcompact config ──────────────────────────────────
