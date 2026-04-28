@@ -132,7 +132,7 @@ class BrowserManager:
         if self.gateway is not None:
             self.ctx.human_assist = self.gateway
 
-        self.ctx.setup_new_tab_listener()
+        self.ctx.setup_popup_close()
         setup_network_capture(page, self.ctx)
         self._setup_dialog_handler(page)
 

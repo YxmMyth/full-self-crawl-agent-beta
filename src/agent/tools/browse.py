@@ -1,13 +1,15 @@
-"""browse — page content snapshot + multi-tab navigation.
+"""browse — single-tab page navigation + content snapshot.
 
 Navigate to a URL (or refresh current), wait for content, return Markdown+HTML
 hybrid representation with Data Signals and Network summary sections.
 
+Single-tab model: agent sees and operates on exactly one tab. Site-triggered
+popups (target="_blank", window.open) are auto-closed at the manager layer
+so the agent never has to think about tabs.
+
 Parameters:
-  url:     optional — navigate to this URL. Omit to snapshot current page.
-  new_tab: optional — open url in a new tab (default false).
-  tab:     optional — switch to tab N (1-based) before snapshot.
-  visual:  optional — take screenshot + vision LLM description (default false).
+  url:    optional — navigate to this URL. Omit to snapshot current page.
+  visual: optional — take screenshot + vision LLM description (default false).
 
 See: docs/工具重新设计共识.md §2.2, docs/browse工具深度设计报告.md
 """
@@ -19,7 +21,6 @@ from typing import Any
 
 from src.browser.context import ToolContext
 from src.browser.dom_settle import wait_for_content
-from src.browser.network_capture import setup_network_capture
 from src.browser.page_repr import build_page_repr
 from src.utils.logging import get_logger
 
@@ -34,10 +35,8 @@ TOOL_DESCRIPTION = (
     "- Data Signals: embedded JSON, framework data objects (clues for browser_eval)\n"
     "- Network Requests: captured API calls (clues for bash curl replay)\n"
     "- Scroll Position: how much content is above/below\n\n"
-    "Tab management:\n"
-    "- new_tab=true: open URL in a new tab\n"
-    "- tab=N: switch to tab N before taking snapshot\n"
-    "- Omit url: refresh snapshot of current page (after interactions)\n\n"
+    "Single-tab model: you always work in one tab. Omit url to refresh the snapshot "
+    "of the current page (after interactions). Pass url to navigate the current tab.\n\n"
     "visual=true: take a screenshot and get a vision-AI description of what's "
     "visible. Use when you need to understand visual layout or non-text content."
 )
@@ -47,14 +46,6 @@ TOOL_PARAMETERS = {
         "url": {
             "type": "string",
             "description": "URL to navigate to. Omit to snapshot current page.",
-        },
-        "new_tab": {
-            "type": "boolean",
-            "description": "Open URL in a new tab (default false).",
-        },
-        "tab": {
-            "type": "integer",
-            "description": "Switch to tab N (1-based) before snapshot.",
         },
         "visual": {
             "type": "boolean",
@@ -67,28 +58,9 @@ TOOL_PARAMETERS = {
 
 async def handle(ctx: ToolContext, **kwargs: Any) -> str:
     url: str | None = kwargs.get("url")
-    new_tab: bool = kwargs.get("new_tab", False)
-    tab: int | None = kwargs.get("tab")
     visual: bool = kwargs.get("visual", False)
 
     try:
-        # Tab management
-        if tab is not None:
-            try:
-                ctx.switch_tab(tab)
-            except ValueError as e:
-                return str(e)
-
-        if new_tab and url:
-            page = await ctx.new_tab()
-            # Setup network capture on new tab
-            from src.browser.network_capture import setup_network_capture as setup_nc
-            setup_nc(page, ctx)
-            # Setup dialog handler
-            async def handle_dialog(dialog):
-                await dialog.accept()
-            page.on("dialog", handle_dialog)
-
         page = ctx.page
 
         # Navigate if URL provided
@@ -111,14 +83,6 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> str:
 
         # Build page representation
         repr_text = await build_page_repr(page, ctx)
-
-        # Tab info
-        if ctx.tab_count > 1:
-            tabs_info = f"\n--- Tabs ({ctx.tab_count}) ---\n"
-            for t in ctx.tab_list():
-                marker = "→" if t["active"] else " "
-                tabs_info += f" {marker} Tab {t['tab']}: {t['url'][:80]}\n"
-            repr_text += tabs_info
 
         # Visual mode: screenshot + vision LLM description
         if visual:

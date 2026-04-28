@@ -133,17 +133,29 @@ class ToolContext:
         """Look up CSS selector for an element number."""
         return self.selector_map.get(element_number)
 
-    # ── New tab detection setup ──────────────────────────
+    # ── Popup auto-close ─────────────────────────────────
 
-    def setup_new_tab_listener(self) -> None:
-        """Register context.on('page') to auto-track new tabs opened by the page."""
+    def setup_popup_close(self) -> None:
+        """Register context.on('page') to auto-close any popup the page tries to open.
 
-        def on_new_page(page: Page) -> None:
-            if page not in self.tabs:
-                self.tabs.append(page)
-                logger.info(
-                    f"New tab detected (popup/link), now {len(self.tabs)} tabs",
-                    extra={"url": page.url},
-                )
+        Why: agent's mental model is single-tab (1 session = 1 tab). Site
+        target="_blank" links and JS-driven window.open() create extra tabs
+        that agent has no use for and historically just leak. We close them
+        immediately. The agent will see the click action complete but the
+        active tab unchanged — which is the correct intent: navigate-the-current-tab.
 
-        self.pw_context.on("page", on_new_page)
+        ToolContext.tabs / new_tab / switch_tab / close_tab methods stay in
+        place for future concurrent-session allocators (1 session = 1 tab,
+        managed by infrastructure, NOT by the agent).
+        """
+
+        async def _close_popup(page: Page) -> None:
+            url = page.url or "about:blank"
+            try:
+                await page.close()
+            except Exception as e:
+                logger.warning(f"Popup auto-close failed: {e}", extra={"url": url})
+                return
+            logger.info(f"Popup auto-closed: {url[:120]}", extra={"url": url})
+
+        self.pw_context.on("page", _close_popup)
