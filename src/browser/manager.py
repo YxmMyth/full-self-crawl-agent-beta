@@ -1,10 +1,15 @@
 """Browser lifecycle management.
 
 Connection priority (in order):
-  1. AsyncCamoufox(persistent_context=True, user_data_dir=per-domain) — default
-  2. BROWSER_WS_URL → playwright.firefox.connect(ws_url) — remote Camoufox
-  3. BROWSER_CDP_URL → playwright.connect_over_cdp(url) — remote Chromium
-  4. playwright.chromium.launch() — local Chromium fallback (no persistence)
+  1. BROWSER_WS_URL → playwright.firefox.connect(ws_url) — remote Camoufox
+  2. BROWSER_CDP_URL → playwright.connect_over_cdp(url) — remote Chromium
+  3. AsyncCamoufox(persistent_context=True, user_data_dir=per-domain) — default
+
+If all three fail, launch raises RuntimeError. There is intentionally no
+silent fallback to vanilla Playwright Chromium — it would have
+`navigator.webdriver=true` and trigger Cloudflare instantly, masking the
+real failure and pulling the agent into a reset loop.
+See: docs/postmortem-2026-04-27-deferred.md, docs/fix-plan-2026-04-27-P0.md
 
 One BrowserManager per domain — its profile is persisted at
 `artifacts/_profiles/{domain}/` across runs (cookies, localStorage, IndexedDB).
@@ -19,6 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from src.browser.context import ToolContext
+from src.browser.firefox_prefs import (
+    SESSION_RESTORE_OFF,
+    sanitize_profile,
+    write_user_js,
+)
 from src.browser.network_capture import setup_network_capture
 from src.config import Config
 from src.utils.logging import get_logger
@@ -68,8 +78,19 @@ class BrowserManager:
         """Launch browser and create ToolContext.
 
         Defaults to headed so human_assist can surface a visible window.
+
+        Only `camoufox` is supported. If launch fails, raises RuntimeError —
+        we do NOT silently fall back to vanilla Chromium because that would
+        be detected by Cloudflare instantly, masking the real failure and
+        sending the agent into a reset loop.
         """
-        self._browser_type = browser_type or "camoufox"
+        if browser_type and browser_type != "camoufox":
+            raise ValueError(
+                f"browser_type='{browser_type}' is not supported. "
+                f"Only 'camoufox' is available. (Vanilla Chromium fallback was "
+                f"removed on 2026-04-28 — see docs/fix-plan-2026-04-27-P0.md.)"
+            )
+        self._browser_type = "camoufox"
         self._headed = headed
         self._proxy = proxy
 
@@ -77,7 +98,7 @@ class BrowserManager:
         pw_context = None
 
         # Priority 1: Remote Camoufox via WebSocket (no per-domain profile)
-        if Config.BROWSER_WS_URL and not browser_type:
+        if Config.BROWSER_WS_URL:
             try:
                 page, pw_context = await self._connect_ws(Config.BROWSER_WS_URL)
                 logger.info("Connected via WebSocket", extra={"url": Config.BROWSER_WS_URL})
@@ -85,7 +106,7 @@ class BrowserManager:
                 logger.warning(f"WS connection failed, trying next: {e}")
 
         # Priority 2: Remote Chromium via CDP (no per-domain profile)
-        if page is None and Config.BROWSER_CDP_URL and not browser_type:
+        if page is None and Config.BROWSER_CDP_URL:
             try:
                 page, pw_context = await self._connect_cdp(Config.BROWSER_CDP_URL)
                 logger.info("Connected via CDP", extra={"url": Config.BROWSER_CDP_URL})
@@ -93,22 +114,17 @@ class BrowserManager:
                 logger.warning(f"CDP connection failed, trying next: {e}")
 
         # Priority 3: Local Camoufox with persistent context (default)
-        if page is None and self._browser_type == "camoufox":
-            try:
-                page, pw_context = await self._launch_camoufox()
-                logger.info(
-                    f"Launched Camoufox (headed={self._headed}, "
-                    f"profile={self.profile_dir})"
-                )
-            except Exception as e:
-                logger.warning(f"Camoufox launch failed, falling back to Chromium: {e}")
-                self._browser_type = "chromium"
-
-        # Priority 4: Local Chromium fallback (no persistent context — emergency)
         if page is None:
-            page, pw_context = await self._launch_chromium()
-            logger.warning(
-                "Launched Chromium fallback — no profile persistence"
+            page, pw_context = await self._launch_camoufox()
+            logger.info(
+                f"Launched Camoufox (headed={self._headed}, "
+                f"profile={self.profile_dir})"
+            )
+
+        if page is None:
+            raise RuntimeError(
+                "All browser engines failed to launch. Check Camoufox install "
+                "(`pip show camoufox`), profile dir permissions, or disk space."
             )
 
         self.ctx = ToolContext(pw_context=pw_context, tabs=[page])
@@ -130,12 +146,25 @@ class BrowserManager:
     ) -> ToolContext:
         """Close current browser and relaunch with new config.
 
-        Same engine + same profile → cookies/state preserved.
-        Switching engine on same domain risks "new device" re-challenge.
+        Same profile → cookies/state preserved across reset.
+
+        Closes non-active tabs first to keep sessionstore.jsonlz4 small —
+        even though we disable session restore via prefs, smaller writes
+        mean faster close.
         """
         bt = browser_type or self._browser_type
         hd = headed if headed is not None else self._headed
         px = proxy if proxy is not None else self._proxy
+
+        # Close non-active tabs to minimize what gets written to sessionstore.
+        if self.ctx and len(self.ctx.tabs) > 1:
+            keep = self.ctx.tabs[self.ctx.active_tab_idx]
+            for tab in list(self.ctx.tabs):
+                if tab is not keep:
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
 
         await self.close()
         return await self.launch(browser_type=bt, headed=hd, proxy=px)
@@ -158,7 +187,7 @@ class BrowserManager:
             self._camoufox_ctx = None
             self._pw_context = None  # Owned by camoufox_ctx, already cleaned
         elif self._pw_context:
-            # Standalone context (chromium fallback / WS / CDP)
+            # Standalone context (WS / CDP) — Camoufox path goes through _camoufox_ctx above.
             try:
                 await self._pw_context.close()
             except Exception:
@@ -192,10 +221,22 @@ class BrowserManager:
     async def _launch_camoufox(self) -> tuple:
         """Launch local Camoufox with per-domain persistent context.
 
+        Profile preparation (Tier 3 sanitize + Tier 2 user.js) happens before
+        AsyncCamoufox — see firefox_prefs.py for the layered model.
+
         persistent_context=True → AsyncCamoufox returns BrowserContext directly,
         no separate Browser object.
         """
         from camoufox.async_api import AsyncCamoufox
+
+        # Tier 3: clean stale volatile state (parent.lock, sessionstore-*) so a
+        # prior unclean shutdown can't make this launch hang at session restore.
+        sanitize_profile(self.profile_dir)
+
+        # Tier 2: write user.js so Firefox reads our prefs at the very start
+        # of boot, BEFORE it decides whether to restore. firefox_user_prefs
+        # below is a defense-in-depth re-injection at runtime.
+        write_user_js(self.profile_dir, SESSION_RESTORE_OFF)
 
         kwargs: dict[str, Any] = {
             "headless": not self._headed,
@@ -205,6 +246,7 @@ class BrowserManager:
             "persistent_context": True,
             "user_data_dir": str(self.profile_dir),
             "viewport": DEFAULT_VIEWPORT,
+            "firefox_user_prefs": SESSION_RESTORE_OFF,
         }
         if self._proxy:
             kwargs["proxy"] = {"server": self._proxy}
@@ -213,31 +255,6 @@ class BrowserManager:
         pw_context = await self._camoufox_ctx.__aenter__()
         self._pw_context = pw_context
         page = pw_context.pages[0] if pw_context.pages else await pw_context.new_page()
-
-        return page, pw_context
-
-    async def _launch_chromium(self) -> tuple:
-        """Launch local Chromium as fallback (non-persistent — emergency mode)."""
-        from playwright.async_api import async_playwright
-
-        self._playwright = await async_playwright().start()
-
-        launch_kwargs: dict[str, Any] = {
-            "headless": not self._headed,
-        }
-        if self._proxy:
-            launch_kwargs["proxy"] = {"server": self._proxy}
-
-        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-        pw_context = await self._browser.new_context(
-            viewport=DEFAULT_VIEWPORT,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
-        self._pw_context = pw_context
-        page = await pw_context.new_page()
 
         return page, pw_context
 

@@ -18,14 +18,14 @@ logger = get_logger(__name__)
 TOOL_NAME = "browser_reset"
 TOOL_DESCRIPTION = (
     "Restart the browser with a new configuration. All parameters optional.\n\n"
-    "Bare call (no params): clean restart — clears cookies, cache, and memory "
-    "while keeping the same browser type and settings.\n\n"
+    "Bare call (no params): clean restart — clears in-memory tabs and cache "
+    "while preserving cookies/login state in the on-disk profile.\n\n"
     "Use when:\n"
-    "- Site detects/blocks you → try proxy or switch to chromium\n"
     "- Browser becomes slow or unresponsive → clean restart\n"
-    "- Need to clear cookies/session state\n"
-    "- Firefox doesn't work with a site → browser_type='chromium'\n\n"
-    "After reset, you start fresh — no open tabs, no history."
+    "- Need to swap proxy → pass proxy='...'\n"
+    "- Need to toggle headed/headless → pass headed=true/false\n\n"
+    "After reset, all open tabs are closed but persistent profile state "
+    "(cookies, localStorage, IndexedDB) survives."
 )
 TOOL_PARAMETERS = {
     "type": "object",
@@ -34,14 +34,9 @@ TOOL_PARAMETERS = {
             "type": "string",
             "description": "Proxy server URL (e.g. 'socks5://user:pass@host:port').",
         },
-        "browser_type": {
-            "type": "string",
-            "enum": ["camoufox", "chromium"],
-            "description": "Browser to use. camoufox (default, anti-detection Firefox) or chromium (compatibility fallback).",
-        },
         "headed": {
             "type": "boolean",
-            "description": "Run with visible browser window (for debugging). Default false.",
+            "description": "Run with visible browser window. Default true.",
         },
     },
     "required": [],
@@ -58,27 +53,26 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
         return "Error: browser_reset requires browser manager access (internal error)"
 
     proxy = kwargs.get("proxy")
-    browser_type = kwargs.get("browser_type")
     headed = kwargs.get("headed")
 
     try:
         new_ctx = await browser_manager.reset(
-            browser_type=browser_type,
             headed=headed,
             proxy=proxy,
         )
 
         parts = ["Browser restarted."]
-        if browser_type:
-            parts.append(f"Type: {browser_type}")
         if proxy:
             parts.append(f"Proxy: {proxy}")
         if headed is not None:
             parts.append(f"Headed: {headed}")
-        if not any([browser_type, proxy, headed is not None]):
+        if not any([proxy, headed is not None]):
             parts.append("Clean restart with same configuration.")
 
-        parts.append("All tabs, cookies, and cache cleared. Use browse() to navigate.")
+        parts.append(
+            "All tabs closed; cookies and on-disk profile state preserved. "
+            "Use browse() to navigate."
+        )
         return " ".join(parts)
 
     except Exception as e:
