@@ -59,13 +59,23 @@ You have 4 tools: read_world_model, bash, think, submit_verdict.
    The samples/ folder must have at least ONE Layer-3 sample of the PRIMARY \
    data on disk. Card thumbnails, preview marketing images, listing JSON \
    are NOT primary data for most sites — they're presentation/index layer.
-   Use bash to inspect:
-     - `ls -la samples/` then `file samples/*` to identify file types
-     - Cross-reference with the site's purpose: are the actual user \
-       deliverables there, or just supporting metadata?
+
+   Use bash to verify ACTUAL file content, not just filenames:
+     - `ls -la samples/` to see sizes
+     - `file samples/*` — confirms each file's real format. A .zip that's \
+       actually HTML (login-redirect disguise) gets caught here.
+     - For archives: `unzip -l samples/foo.zip` (or `tar tzf` / `7z l`) — \
+       confirms it's a real archive with real entries.
+     - Sanity: byte size > 1KB (a 17-byte file is almost certainly an error \
+       placeholder, not a sample).
+
+   Cross-reference with the site's purpose: are the actual user deliverables \
+   there, or just supporting metadata?
    If samples are all card_image.png + listing.json but the site is a \
    marketplace where users download Figma files, that's INCOMPLETE — \
    FAIL with a gap stating which primary data type has no real sample.
+   If `file` reports HTML / text for what should be binary, FAIL with \
+   "samples are HTML disguises, not real downloads — likely auth issue".
 
 4. DEPTH VS SURFACE.
    Did the system actually understand the data, or just list pages? \

@@ -22,7 +22,7 @@ from src.agent.tools.registry import ToolRegistry
 from src.agent.tools import (
     think, read_wm, browse, read_network, browser_eval, browser_reset,
     click, input as input_tool, press_key, scroll, go_back, bash_tool,
-    human_assist as human_assist_tool,
+    human_assist as human_assist_tool, fetch,
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
@@ -37,12 +37,12 @@ logger = get_logger(__name__)
 
 
 def build_execution_registry() -> ToolRegistry:
-    """Register all 13 execution agent tools."""
+    """Register all 14 execution agent tools."""
     registry = ToolRegistry()
     tools = [
         think, read_wm, browse, read_network, browser_eval, browser_reset,
         click, input_tool, press_key, scroll, go_back, bash_tool,
-        human_assist_tool,
+        human_assist_tool, fetch,
     ]
     for t in tools:
         registry.register(t.TOOL_NAME, t.TOOL_DESCRIPTION, t.TOOL_PARAMETERS, t.handle)

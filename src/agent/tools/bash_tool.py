@@ -4,10 +4,14 @@ Spawns a new process each time (stateless). Working directory fixed to
 artifacts/{domain}/workspace/. Output tail-truncated at 30K chars.
 Large outputs auto-saved to workspace/.
 
-Use for: API replay with curl/curl_cffi, data processing, file operations,
-running extraction scripts, HTTP requests with browser TLS fingerprinting.
+Use for: scripts (Python/shell), file operations, post-processing
+(unzip / file / jq / grep), data transforms.
 
-See: docs/工具重新设计共识.md §2.2
+For HTTP requests (GET, JSON APIs, binary downloads), use the `fetch` tool
+instead — it goes through the browser session so cookies / auth / redirects
+are handled automatically.
+
+See: docs/工具重新设计共识.md §2.2, docs/抽象边界原则.md
 """
 
 from __future__ import annotations
@@ -32,11 +36,13 @@ TOOL_DESCRIPTION = (
     "- Scripts are at ../scripts/\n"
     "- Example: cat ../samples/data.json  |  ls ../  |  ls .\n\n"
     "Use for:\n"
-    "- API replay: curl_cffi for browser-like TLS fingerprints\n"
-    "- Data processing: Python scripts\n"
-    "- File verification: check saved samples\n\n"
-    "Tip: curl_cffi example:\n"
-    "  python -c \"from curl_cffi import requests; r = requests.get('URL', impersonate='chrome'); print(r.text[:500])\"\n\n"
+    "- File operations and inspection: file ../samples/X, unzip -l, head, jq, grep\n"
+    "- Scripts: Python data processing, shell pipelines\n"
+    "- Anything that's NOT an HTTP request\n\n"
+    "For HTTP requests, use the `fetch` tool instead — it uses the browser's "
+    "session (cookies, auth, redirects, TLS) automatically. Don't try to do "
+    "HTTP via bash + curl/curl_cffi — you would lose the browser's session "
+    "and end up with auth failures on logged-in pages.\n\n"
     "Output capped at 30,000 chars (tail-truncated). Large outputs auto-saved."
 )
 TOOL_PARAMETERS = {

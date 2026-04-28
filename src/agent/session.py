@@ -72,6 +72,28 @@ re-observe — the tool does NOT auto-confirm "login successful". You judge \
 from the new page state. Reserve this for true human-only gates, not for \
 "I haven't found X yet" exploration or pages that just need scrolling.
 
+9. PRIMARY DATA — FIRST SAMPLE FAST, THEN STOP. When the requirement asks \
+for samples (Layer-3 primary data: zip / pdf / figma / image bytes / full \
+text), the goal is ONE proven sample on disk EARLY, to validate the method \
+works — before broadening.
+   - To download files, use the `fetch` tool (it sends browser cookies & auth \
+automatically). Don't loop on browser_eval+fetch in JS — that path can't \
+write binaries to disk and is a dead end.
+   - If `fetch` returns reason='auth_required' or 'got_html_likely_login_redirect', \
+the path is RIGHT but the session needs login → browse() to verify, then \
+request_human_assist if needed. Don't switch to a different product hoping \
+auth will magically appear there.
+   - If one path fails, try a DIFFERENT path (different URL discovered via \
+browse, click the Download button and inspect, fetch the file via API). \
+Method failure ≠ product failure.
+   - Once one sample succeeds: STOP downloading. Verify (`bash`: `file ../samples/X`, \
+`unzip -l ../samples/X` for archives, byte size > 1KB). Record the method \
+in your reasoning. Sample 1-2 more products only to confirm the method generalizes, \
+not to "complete coverage".
+   - 100 metadata JSON files do NOT substitute for 1 binary sample. If you \
+notice yourself describing a third product without a real sample on disk, \
+stop and ask: "have I actually downloaded anything?"
+
 ## Data Hierarchy (what you're actually hunting)
 
 Every site has a 3-layer data hierarchy. Recon means mapping ALL three. \
