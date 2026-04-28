@@ -462,26 +462,13 @@ class AgentSession:
 
     @staticmethod
     def _build_assistant_msg(response: LLMResponse) -> dict[str, Any]:
-        """Build an OpenAI-format assistant message from LLM response."""
-        msg: dict[str, Any] = {"role": "assistant"}
+        """Build an OpenAI-format assistant message from LLM response.
 
-        if response.content:
-            msg["content"] = response.content
-
-        if response.tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                    },
-                }
-                for tc in response.tool_calls
-            ]
-
-        return msg
+        Delegates to LLMResponse.to_assistant_message so reasoning_content
+        from thinking-mode models (deepseek-v4-pro etc.) is echoed back —
+        those models reject the next call if it's missing.
+        """
+        return response.to_assistant_message()
 
     # ── Observability ────────────────────────────────────
 

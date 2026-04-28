@@ -37,6 +37,37 @@ class LLMResponse:
     reasoning: str | None = None  # deepseek reasoning_content if present
     usage: TokenUsage | None = None
 
+    def to_assistant_message(self) -> dict[str, Any]:
+        """Build an OpenAI-format assistant message from this response,
+        suitable for appending to the messages array of the next API call.
+
+        Echoes back reasoning_content (DeepSeek thinking-mode models REQUIRE
+        the prior turn's reasoning_content to be present in the assistant
+        message; the API rejects calls that drop it with HTTP 400).
+
+        Returns a dict with role + whatever fields are populated. Caller is
+        responsible for ensuring the message has at least content or
+        tool_calls (some providers reject pure-empty assistant messages).
+        """
+        msg: dict[str, Any] = {"role": "assistant"}
+        if self.content:
+            msg["content"] = self.content
+        if self.tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in self.tool_calls
+            ]
+        if self.reasoning:
+            msg["reasoning_content"] = self.reasoning
+        return msg
+
 
 @dataclass
 class TokenUsage:

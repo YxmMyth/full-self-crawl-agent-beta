@@ -263,17 +263,8 @@ class ReconPlanner:
             if response is None:
                 return "context_exhausted"
 
-            # Append assistant message
-            assistant_msg: dict[str, Any] = {"role": "assistant"}
-            if response.content:
-                assistant_msg["content"] = response.content
-            if response.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
-                    for tc in response.tool_calls
-                ]
-            self.messages.append(assistant_msg)
+            # Append assistant message (echoes reasoning_content for thinking models)
+            self.messages.append(response.to_assistant_message())
 
             # No tool calls → done (shouldn't normally happen)
             if not response.tool_calls:

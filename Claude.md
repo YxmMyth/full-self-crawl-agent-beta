@@ -133,8 +133,8 @@ src/
 │   └── recon_planner.py       # ReconPlanner：tool-use agent 主循环 + 5 个工具实现
 ├── agent/
 │   ├── session.py             # Agent Session 执行循环
-│   └── tools/                 # 13 个工具（详见 docs/工具重新设计共识.md）
-│       ├── browse.py          # 页面内容快照 + 多标签页导航
+│   └── tools/                 # 14 个工具（详见 docs/工具重新设计共识.md）
+│       ├── browse.py          # 页面内容快照（单 tab 模型，popup 自动关）
 │       ├── read_network.py    # 网络层信息
 │       ├── browser_eval.py    # 浏览器内 JS 执行
 │       ├── browser_reset.py   # 浏览器重启/重配置
@@ -143,7 +143,8 @@ src/
 │       ├── press_key.py       # 按键
 │       ├── scroll.py          # 滚动
 │       ├── go_back.py         # 浏览器后退
-│       ├── bash_tool.py       # 系统代码执行
+│       ├── bash_tool.py       # 系统命令（脚本/文件操作；HTTP 走 fetch）
+│       ├── fetch.py           # HTTP 请求（自动带 browser session：cookies/auth/redirect/TLS）
 │       ├── think.py           # 推理
 │       ├── read_wm.py         # 查询 World Model
 │       └── human_assist.py    # 请求人类介入（thin wrapper → runtime gateway）

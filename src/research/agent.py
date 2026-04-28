@@ -225,18 +225,10 @@ async def run_research(
         if response is None:
             break
 
-        # Build assistant message
-        assistant_msg: dict[str, Any] = {"role": "assistant"}
+        # Build assistant message (echoes reasoning_content for thinking models)
         if response.content:
-            assistant_msg["content"] = response.content
             findings_text = response.content  # last content = final findings
-        if response.tool_calls:
-            assistant_msg["tool_calls"] = [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
-                for tc in response.tool_calls
-            ]
-        messages.append(assistant_msg)
+        messages.append(response.to_assistant_message())
 
         if not response.tool_calls:
             break
