@@ -174,11 +174,12 @@ src/
     ├── url.py                 # URL 规范化
     └── logging.py             # 结构化日志
 
-# 运行时文件结构（per-domain）
-artifacts/{domain}/
-├── samples/                   # 提取的数据样本（browser_eval save_as）
+# 运行时文件结构（per-domain，每个 run 一份）
+artifacts/{domain}/runs/{run_id}/
+├── samples/                   # ★ Primary data only — fetch/browser_eval 用 kind='sample' 落到这
+├── catalog/                   # 索引/列表/API metadata — kind='catalog' 落到这（不算 primary data）
+├── workspace/                 # 探索/debug/scratch — kind='workspace'，bash 输出，HUMAN_DONE 信号
 ├── scripts/                   # 可复用脚本（精准记忆）
-├── workspace/                 # 临时文件、bash 大输出落盘、HUMAN_DONE 信号文件
 ├── transcripts/               # session 完整记录（JSONL）
 ├── research/                  # Research Subagent 调研报告（markdown）
 └── verification/              # [feature-gated] Verification Subagent 验证报告 + VERDICT

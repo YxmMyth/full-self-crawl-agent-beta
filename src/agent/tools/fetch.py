@@ -43,15 +43,27 @@ TOOL_DESCRIPTION = (
     "TLS stack is used. Use for JSON APIs, binary file downloads, and anything "
     "requiring the current login session.\n\n"
     "Behavior:\n"
-    "- Without save_as: small responses (<200KB) returned inline as body. "
-    "Larger responses auto-saved to workspace/ and returned as path.\n"
-    "- With save_as (relative path under artifacts/{domain}/): always written "
-    "to disk. Use for samples like 'samples/design.fig' or 'samples/data.zip'.\n\n"
+    "- Without save_as: small responses (<200KB) returned inline; larger ones "
+    "auto-saved to workspace/ (treated as kind='workspace').\n"
+    "- With save_as: kind is REQUIRED. The kind picks the directory:\n"
+    "    kind='sample'    → samples/{save_as}    primary data (the deliverable)\n"
+    "    kind='catalog'   → catalog/{save_as}    indexes / listings / API metadata\n"
+    "    kind='workspace' → workspace/{save_as}  exploration / debug / scratch\n"
+    "  save_as must be a FILENAME only (no directory prefix, no '..'). The kind "
+    "determines where it lands.\n\n"
+    "What counts as each kind (BE STRICT — verification will check):\n"
+    "  sample = ONE concrete instance of the primary data, in its native form. "
+    "A pen's full source HTML+CSS+JS, a Figma .fig file, an article body. "
+    "A LIST of 100 pen IDs is NOT a sample.\n"
+    "  catalog = metadata about samples: API responses, listings, URL maps, "
+    "ID/title/owner pages. Useful as recon notes but NOT the deliverable.\n"
+    "  workspace = exploration that may or may not turn into something. "
+    "Failed extractions, debug dumps, intermediate parses.\n\n"
     "Returns on success: {status:'ok', body|path, size_bytes, content_type, "
     "http_status, final_url}.\n"
-    "Returns on error: {status:'error', reason, hint, http_status?, content_type?}. "
-    "Reasons: auth_required, forbidden, not_found, got_html_likely_login_redirect, "
-    "empty_body, exceeds_max_size, server_error, network_error, invalid_input.\n\n"
+    "Returns on error: {status:'error', reason, hint, ...}. Reasons: auth_required, "
+    "forbidden, not_found, got_html_likely_login_redirect, empty_body, "
+    "exceeds_max_size, server_error, network_error, invalid_input.\n\n"
     "Don't use for: rendering HTML pages (use browse), shell commands (use bash)."
 )
 TOOL_PARAMETERS = {
@@ -61,8 +73,18 @@ TOOL_PARAMETERS = {
         "save_as": {
             "type": "string",
             "description": (
-                "Optional. Path relative to artifacts/{domain}/ (e.g. "
-                "'samples/foo.zip'). If omitted, small responses return inline."
+                "Optional. FILENAME ONLY (no directory, no '..'). Required-with kind. "
+                "Examples: 'lion_pen.html', 'pens_page1.json', 'design_42.fig.zip'."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "enum": ["sample", "catalog", "workspace"],
+            "description": (
+                "REQUIRED when save_as is given. Classifies the saved content: "
+                "'sample' (primary data, the deliverable), "
+                "'catalog' (metadata about samples — listings, APIs, IDs), "
+                "'workspace' (exploration / debug / scratch)."
             ),
         },
         "max_size_mb": {
@@ -72,6 +94,8 @@ TOOL_PARAMETERS = {
     },
     "required": ["url"],
 }
+
+_KIND_DIRS = {"sample": "samples", "catalog": "catalog", "workspace": "workspace"}
 
 
 _DEFAULT_MAX_MB = 100
@@ -113,16 +137,34 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> dict:
     save_as: str | None = kwargs.get("save_as")
     if save_as is not None:
         save_as = save_as.strip()
+    kind: str | None = kwargs.get("kind")
+    if kind is not None:
+        kind = kind.strip().lower() or None
     max_mb = int(kwargs.get("max_size_mb") or _DEFAULT_MAX_MB)
 
     # Validate input
     if not url:
         return _err("invalid_input", hint="url is required")
-    if save_as is not None and (".." in save_as or save_as.startswith(("/", "\\"))):
-        return _err(
-            "invalid_input",
-            hint="save_as must be a relative path without '..'",
-        )
+    if save_as is not None:
+        if "/" in save_as or "\\" in save_as or ".." in save_as:
+            return _err(
+                "invalid_input",
+                hint="save_as must be a FILENAME only (no directory, no '..'). "
+                     "The kind parameter picks the directory.",
+            )
+        if not kind:
+            return _err(
+                "invalid_input",
+                hint="kind is REQUIRED when save_as is given. "
+                     "Pick one: 'sample' (primary data deliverable), "
+                     "'catalog' (metadata/listings/IDs), or 'workspace' (debug/scratch). "
+                     "If unsure, this content is probably catalog or workspace, not sample.",
+            )
+        if kind not in _KIND_DIRS:
+            return _err(
+                "invalid_input",
+                hint=f"kind must be one of {list(_KIND_DIRS)}, got '{kind}'.",
+            )
 
     # Resolve domain (for run_dir destination)
     domain = getattr(ctx, "_domain", None)
@@ -201,16 +243,19 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> dict:
 
     # Decide save destination: explicit save_as wins; else auto-save large; else inline
     if save_as:
-        dest = run_dir / save_as
+        # kind is validated above — route by kind
+        rel_path = f"{_KIND_DIRS[kind]}/{save_as}"
+        dest = run_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body_bytes)
         logger.info(
-            f"fetch saved {url} → {save_as} ({_human(size)})",
-            extra={"tool": "fetch", "size": size, "domain": domain},
+            f"fetch saved {url} → {rel_path} (kind={kind}, {_human(size)})",
+            extra={"tool": "fetch", "size": size, "domain": domain, "kind": kind},
         )
         return {
             "status": "ok",
-            "path": save_as,
+            "path": rel_path,
+            "kind": kind,
             "size_bytes": size,
             "size_human": _human(size),
             "content_type": content_type,

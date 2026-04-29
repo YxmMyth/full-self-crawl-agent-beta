@@ -28,10 +28,17 @@ TOOL_DESCRIPTION = (
     "- Running async operations (fetch, etc.)\n\n"
     "The script runs in the page context with full DOM and JS access. "
     "Supports async/await. The last expression's value is returned.\n\n"
-    "save_as: optional path relative to artifacts/{domain}/ to save the result. "
-    "Example: save_as='samples/pens.json' or save_as='scripts/extract_pens.js'\n\n"
-    "Large results (>50KB) are automatically saved to workspace/ and a preview + "
-    "file path is returned instead."
+    "save_as: optional FILENAME (no directory, no '..') to save the result.\n"
+    "kind: REQUIRED when save_as is given. Picks the directory:\n"
+    "  'sample'    → samples/{save_as}    primary data (the deliverable)\n"
+    "  'catalog'   → catalog/{save_as}    indexes / listings / API metadata / IDs\n"
+    "  'workspace' → workspace/{save_as}  exploration / debug / scratch\n\n"
+    "What counts as each (BE STRICT — verification will check):\n"
+    "  sample = ONE concrete instance of the primary data, in native form. "
+    "A list of pen IDs is NOT a sample.\n"
+    "  catalog = metadata about samples (listings, API responses, IDs, URL maps).\n"
+    "  workspace = exploration that may or may not pan out.\n\n"
+    "Large results (>50KB) without save_as are auto-saved to workspace/."
 )
 TOOL_PARAMETERS = {
     "type": "object",
@@ -42,11 +49,24 @@ TOOL_PARAMETERS = {
         },
         "save_as": {
             "type": "string",
-            "description": "Save result to this path under artifacts/{domain}/ (e.g. 'samples/data.json').",
+            "description": (
+                "FILENAME ONLY (no directory, no '..'). Required-with kind. "
+                "Examples: 'pens.json', 'lion_dom.html', 'extract_result.txt'."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "enum": ["sample", "catalog", "workspace"],
+            "description": (
+                "REQUIRED when save_as is given. 'sample' for primary data, "
+                "'catalog' for listings/IDs/metadata, 'workspace' for debug/scratch."
+            ),
         },
     },
     "required": ["script"],
 }
+
+_KIND_DIRS = {"sample": "samples", "catalog": "catalog", "workspace": "workspace"}
 
 _MAX_INLINE = 50 * 1024  # 50KB — beyond this, auto-save to workspace
 _TIMEOUT_MS = 30000
@@ -65,13 +85,29 @@ _ERROR_HINTS = [
 async def handle(ctx: ToolContext, **kwargs: Any) -> str:
     script: str = kwargs.get("script", "")
     save_as: str | None = kwargs.get("save_as")
+    kind: str | None = kwargs.get("kind")
+    if kind is not None:
+        kind = kind.strip().lower() or None
 
     if not script.strip():
         return "Error: empty script"
 
-    # Validate save_as path (prevent directory traversal)
-    if save_as and ".." in save_as:
-        return "Error: save_as path cannot contain '..'"
+    # Validate save_as + kind
+    if save_as:
+        if "/" in save_as or "\\" in save_as or ".." in save_as:
+            return (
+                "Error: save_as must be a FILENAME only (no directory, no '..'). "
+                "The kind parameter picks the directory."
+            )
+        if not kind:
+            return (
+                "Error: kind is REQUIRED when save_as is given. "
+                "Pick 'sample' (primary data deliverable), 'catalog' "
+                "(metadata/listings/IDs), or 'workspace' (debug/scratch). "
+                "If unsure, this content is probably catalog or workspace, not sample."
+            )
+        if kind not in _KIND_DIRS:
+            return f"Error: kind must be one of {list(_KIND_DIRS)}, got '{kind}'."
 
     page = ctx.page
     domain = getattr(ctx, "_domain", "unknown")
@@ -110,14 +146,21 @@ async def handle(ctx: ToolContext, **kwargs: Any) -> str:
 
     result_size = len(result_str)
 
-    # Save to file if requested
+    # Save to file if requested (kind validated above)
     if save_as:
         artifacts_dir = Config.run_dir(domain)
-        save_path = artifacts_dir / save_as
+        rel_path = f"{_KIND_DIRS[kind]}/{save_as}"
+        save_path = artifacts_dir / rel_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
         save_path.write_text(result_str, encoding="utf-8")
-        logger.info(f"Saved to {save_path}", extra={"tool": "browser_eval"})
-        return f"[{result_type}, {_human_size(result_size)}] Saved to {save_as}\n\nPreview:\n{result_str[:2000]}"
+        logger.info(
+            f"Saved to {save_path} (kind={kind})",
+            extra={"tool": "browser_eval", "kind": kind},
+        )
+        return (
+            f"[{result_type}, {_human_size(result_size)}] "
+            f"Saved to {rel_path} (kind={kind})\n\nPreview:\n{result_str[:2000]}"
+        )
 
     # Auto-save large results
     if result_size > _MAX_INLINE:

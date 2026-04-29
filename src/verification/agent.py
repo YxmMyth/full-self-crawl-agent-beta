@@ -46,7 +46,7 @@ You have 4 tools: read_world_model, bash, think, submit_verdict.
    or "quantity unknown"? Are there obvious follow-up paths that \
    were discovered but never investigated?
 
-3. PRIMARY DATA SAMPLED (not just thumbnails / metadata).
+3. PRIMARY DATA SAMPLED (samples/ only — strict).
    First identify what this site's PRIMARY data is — what a real user comes \
    here to get:
      - News → article full text
@@ -56,26 +56,31 @@ You have 4 tools: read_world_model, bash, think, submit_verdict.
      - Video → video file / transcript
      - E-commerce → product specs + reviews
      - Documentation → full doc text
-   The samples/ folder must have at least ONE Layer-3 sample of the PRIMARY \
-   data on disk. Card thumbnails, preview marketing images, listing JSON \
-   are NOT primary data for most sites — they're presentation/index layer.
+     - Codepen / source pen sites → the pen's full runnable source
 
-   Use bash to verify ACTUAL file content, not just filenames:
+   ONLY the `samples/` directory counts as primary data. The agent's \
+   tools (fetch / browser_eval) classify writes by kind: samples/ is \
+   exclusively for kind='sample'. Files in catalog/ or workspace/ DO NOT \
+   count as samples no matter how interesting their contents.
+
+   Use bash to verify ACTUAL file content of samples/ entries:
      - `ls -la samples/` to see sizes
      - `file samples/*` — confirms each file's real format. A .zip that's \
        actually HTML (login-redirect disguise) gets caught here.
-     - For archives: `unzip -l samples/foo.zip` (or `tar tzf` / `7z l`) — \
-       confirms it's a real archive with real entries.
-     - Sanity: byte size > 1KB (a 17-byte file is almost certainly an error \
+     - For archives: `unzip -l samples/foo.zip` (or `tar tzf` / `7z l`).
+     - Sanity: byte size > 1KB (anything smaller is almost certainly an error \
        placeholder, not a sample).
 
-   Cross-reference with the site's purpose: are the actual user deliverables \
-   there, or just supporting metadata?
-   If samples are all card_image.png + listing.json but the site is a \
-   marketplace where users download Figma files, that's INCOMPLETE — \
-   FAIL with a gap stating which primary data type has no real sample.
-   If `file` reports HTML / text for what should be binary, FAIL with \
-   "samples are HTML disguises, not real downloads — likely auth issue".
+   Then cross-reference with the site's purpose: are the actual user \
+   deliverables there, or just supporting metadata mis-classified as sample?
+   If samples/ is empty or holds only thumbnails/listings, FAIL with a gap \
+   naming the missing primary data type.
+   If `file` reports HTML/text for what should be binary, FAIL with "samples \
+   are HTML disguises, not real downloads — likely auth issue".
+
+   Note: catalog/ may have many useful files (listings, IDs, URL maps) — \
+   those are recon notes about WHERE samples are, not samples themselves. \
+   Their presence does NOT compensate for empty samples/.
 
 4. DEPTH VS SURFACE.
    Did the system actually understand the data, or just list pages? \

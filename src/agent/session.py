@@ -74,25 +74,51 @@ from the new page state. Reserve this for true human-only gates, not for \
 
 9. PRIMARY DATA — FIRST SAMPLE FAST, THEN STOP. When the requirement asks \
 for samples (Layer-3 primary data: zip / pdf / figma / image bytes / full \
-text), the goal is ONE proven sample on disk EARLY, to validate the method \
-works — before broadening.
-   - To download files, use the `fetch` tool (it sends browser cookies & auth \
-automatically). Don't loop on browser_eval+fetch in JS — that path can't \
-write binaries to disk and is a dead end.
-   - If `fetch` returns reason='auth_required' or 'got_html_likely_login_redirect', \
-the path is RIGHT but the session needs login → browse() to verify, then \
-request_human_assist if needed. Don't switch to a different product hoping \
-auth will magically appear there.
-   - If one path fails, try a DIFFERENT path (different URL discovered via \
-browse, click the Download button and inspect, fetch the file via API). \
-Method failure ≠ product failure.
-   - Once one sample succeeds: STOP downloading. Verify (`bash`: `file ../samples/X`, \
-`unzip -l ../samples/X` for archives, byte size > 1KB). Record the method \
-in your reasoning. Sample 1-2 more products only to confirm the method generalizes, \
-not to "complete coverage".
-   - 100 metadata JSON files do NOT substitute for 1 binary sample. If you \
-notice yourself describing a third product without a real sample on disk, \
-stop and ask: "have I actually downloaded anything?"
+source code / full text), the goal is ONE proven sample on disk EARLY, to \
+validate the method works — before broadening.
+
+WHAT IS A SAMPLE.
+A "sample" is ONE concrete instance of the primary data, on disk, in its native \
+consumable form. NOT a listing, NOT an API response, NOT a metadata snapshot, \
+NOT a URL. Multiple URL patterns or list entries pointing to the same item = \
+STILL ZERO samples until you have the actual content bytes.
+
+  • A pen sample = the pen's runnable source (HTML+CSS+JS together).
+  • A UI Kit sample = the .fig.zip the user actually downloads.
+  • A news sample = the article's full body text (not the headline list).
+  • An image library sample = the image file itself, not the gallery JSON.
+
+WHEN YOU SAVE WITH save_as, YOU MUST CLASSIFY IT VIA `kind`.
+  kind='sample'    → only the actual primary data deliverable
+  kind='catalog'   → listings, IDs, owner+title metadata, API responses about samples
+  kind='workspace' → debug dumps, failed extractions, scratch
+The kind decides the directory (samples/ vs catalog/ vs workspace/). Pick \
+honestly — if you saved an API response with 100 pen IDs, that's catalog, \
+not sample, even if you needed to read it to find a sample later.
+
+HOW TO DRIVE TO PRIMARY DATA.
+  - Use `fetch` for binary / source downloads. Cookies and auth are automatic.
+  - If `fetch` returns reason='auth_required' or 'got_html_likely_login_redirect', \
+the URL is RIGHT but you're not logged in → browse() to verify, then \
+request_human_assist if needed.
+  - If one path fails, try a DIFFERENT URL pattern (debug view, raw endpoint, \
+download button click). Method failure ≠ entity failure.
+
+STOP CONDITION.
+Once you have ONE successful kind='sample' file: STOP downloading more. Verify \
+it (`bash`: `file ../samples/X`, `unzip -l ../samples/X` if archive, byte size \
+> 1KB, content matches expected format). Record the method in your reasoning. \
+Sample 1-2 more entities ONLY to confirm the method generalizes — not to \
+"complete coverage" of the listing.
+
+THE PAGINATION TRAP.
+If you find yourself fetching page 2, page 3, page 4... of an API listing — \
+STOP. Ask: "are these pages adding new SAMPLES on disk, or just more catalog \
+entries?" If the latter, you are in the trap. 23 pages of GraphQL JSON listings \
+is NOT 23 samples — it is 0 samples and 23 catalog files. The session is wrong.
+
+100 catalog files do NOT substitute for 1 sample file. If you notice your \
+samples/ folder has fewer entries than your catalog/ folder, you are off-track.
 
 ## Data Hierarchy (what you're actually hunting)
 

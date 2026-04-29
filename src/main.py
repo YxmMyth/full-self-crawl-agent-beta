@@ -58,7 +58,7 @@ async def run(domain: str, requirement: str) -> None:
     # Generate run_id for this mission and create per-run artifacts dir
     run_id = Config.set_run_id(requirement)
     run_dir = Config.run_dir(domain)
-    for subdir in ["samples", "sessions", "workspace", "research", "verification"]:
+    for subdir in ["samples", "catalog", "sessions", "workspace", "research", "verification"]:
         (run_dir / subdir).mkdir(parents=True, exist_ok=True)
     # Record this run's requirement so other runs (and humans) can see why it ran
     (run_dir / "requirement.txt").write_text(requirement, encoding="utf-8")
