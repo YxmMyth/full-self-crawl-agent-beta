@@ -34,7 +34,7 @@ class Observation:
 class Location:
     """A discovered URL pattern on the target site.
 
-    ID format: domain::pattern (e.g. "codepen.io::/tag/{tag}")
+    ID format: domain::pattern (e.g. "example.com::/category/{slug}")
     Granularity decided by the agent — system does not enforce URL normalization rules.
     """
     id: str                           # domain::pattern

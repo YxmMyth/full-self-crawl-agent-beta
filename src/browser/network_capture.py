@@ -111,7 +111,7 @@ def _count_items(body_bytes: bytes) -> int | None:
             return len(data)
         # Common patterns: {"data": [...], "results": [...], "items": [...]}
         if isinstance(data, dict):
-            for key in ("data", "results", "items", "pens", "entries",
+            for key in ("data", "results", "items", "entries",
                         "records", "list", "hits", "edges", "nodes"):
                 val = data.get(key)
                 if isinstance(val, list):

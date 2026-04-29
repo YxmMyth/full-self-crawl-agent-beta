@@ -122,9 +122,13 @@ def main() -> None:
         domain = sys.argv[1]
         requirement = sys.argv[2]
     else:
-        # Default MVP target
-        domain = "codepen.io"
-        requirement = "找出 threejs 相关的 pen 数据：页面结构、数据来源（API/嵌入JSON/DOM）、提取方法、样本"
+        # No CLI args — show usage and exit. The agent is domain-agnostic;
+        # there is no canonical default site.
+        print(
+            "Usage: python src/main.py <domain> <requirement>\n"
+            "  e.g. python src/main.py example.com '采集若干代表性样本'"
+        )
+        sys.exit(2)
 
     try:
         asyncio.run(run(domain, requirement))

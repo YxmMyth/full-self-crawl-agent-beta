@@ -53,8 +53,8 @@ TOOL_DESCRIPTION = (
     "determines where it lands.\n\n"
     "What counts as each kind (BE STRICT — verification will check):\n"
     "  sample = ONE concrete instance of the primary data, in its native form. "
-    "A pen's full source HTML+CSS+JS, a Figma .fig file, an article body. "
-    "A LIST of 100 pen IDs is NOT a sample.\n"
+    "What a real user would open or download from the site. "
+    "A LIST of 100 entity IDs is NOT a sample.\n"
     "  catalog = metadata about samples: API responses, listings, URL maps, "
     "ID/title/owner pages. Useful as recon notes but NOT the deliverable.\n"
     "  workspace = exploration that may or may not turn into something. "
@@ -74,7 +74,7 @@ TOOL_PARAMETERS = {
             "type": "string",
             "description": (
                 "Optional. FILENAME ONLY (no directory, no '..'). Required-with kind. "
-                "Examples: 'lion_pen.html', 'pens_page1.json', 'design_42.fig.zip'."
+                "Examples: 'article_42.html', 'listing_page1.json', 'asset_42.zip'."
             ),
         },
         "kind": {

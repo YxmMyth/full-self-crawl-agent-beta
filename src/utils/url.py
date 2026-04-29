@@ -36,8 +36,8 @@ def normalize(url: str) -> str:
 def extract_domain(url: str) -> str:
     """Extract the domain (hostname) from a URL.
 
-    >>> extract_domain("https://codepen.io/tag/threejs")
-    'codepen.io'
+    >>> extract_domain("https://example.com/category/foo")
+    'example.com'
     """
     parsed = urlparse(url)
     return (parsed.hostname or "").lower()
@@ -57,8 +57,8 @@ def same_origin(url_a: str, url_b: str) -> bool:
 def resolve(base: str, relative: str) -> str:
     """Resolve a relative URL against a base URL.
 
-    >>> resolve("https://codepen.io/tag/threejs", "/pen/abc123")
-    'https://codepen.io/pen/abc123'
+    >>> resolve("https://example.com/category/foo", "/detail/abc123")
+    'https://example.com/detail/abc123'
     """
     return urljoin(base, relative)
 
@@ -68,8 +68,8 @@ def path_only(url: str) -> str:
 
     Useful for display and location patterns.
 
-    >>> path_only("https://codepen.io/tag/threejs?page=2")
-    '/tag/threejs?page=2'
+    >>> path_only("https://example.com/category/foo?page=2")
+    '/category/foo?page=2'
     """
     parsed = urlparse(url)
     path = parsed.path or "/"

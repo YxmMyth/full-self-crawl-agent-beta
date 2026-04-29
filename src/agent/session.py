@@ -83,17 +83,22 @@ consumable form. NOT a listing, NOT an API response, NOT a metadata snapshot, \
 NOT a URL. Multiple URL patterns or list entries pointing to the same item = \
 STILL ZERO samples until you have the actual content bytes.
 
-  • A pen sample = the pen's runnable source (HTML+CSS+JS together).
-  • A UI Kit sample = the .fig.zip the user actually downloads.
-  • A news sample = the article's full body text (not the headline list).
+  • A UI Kit / asset marketplace sample = the .fig / .sketch / .zip the user downloads.
+  • A news / blog sample = the article's full body text (not the headline list).
   • An image library sample = the image file itself, not the gallery JSON.
+  • A code-sharing / sandbox sample = the runnable source files together.
+  • A documentation sample = the page's full rendered or source body.
+
+The list is illustrative — for any site, ask: "what would a real user open or \
+download here?" That's the sample. The schema describing where it lives, how \
+it's listed, who owns it = catalog, not sample.
 
 WHEN YOU SAVE WITH save_as, YOU MUST CLASSIFY IT VIA `kind`.
   kind='sample'    → only the actual primary data deliverable
   kind='catalog'   → listings, IDs, owner+title metadata, API responses about samples
   kind='workspace' → debug dumps, failed extractions, scratch
 The kind decides the directory (samples/ vs catalog/ vs workspace/). Pick \
-honestly — if you saved an API response with 100 pen IDs, that's catalog, \
+honestly — if you saved an API response with 100 entity IDs, that's catalog, \
 not sample, even if you needed to read it to find a sample later.
 
 HOW TO DRIVE TO PRIMARY DATA.
@@ -112,10 +117,11 @@ Sample 1-2 more entities ONLY to confirm the method generalizes — not to \
 "complete coverage" of the listing.
 
 THE PAGINATION TRAP.
-If you find yourself fetching page 2, page 3, page 4... of an API listing — \
+If you find yourself fetching page 2, page 3, page 4... of any API listing — \
 STOP. Ask: "are these pages adding new SAMPLES on disk, or just more catalog \
-entries?" If the latter, you are in the trap. 23 pages of GraphQL JSON listings \
-is NOT 23 samples — it is 0 samples and 23 catalog files. The session is wrong.
+entries?" If the latter, you are in the trap. N pages of paginated listing \
+JSON is NOT N samples — it is 0 samples and N catalog files. The session is \
+wrong.
 
 100 catalog files do NOT substitute for 1 sample file. If you notice your \
 samples/ folder has fewer entries than your catalog/ folder, you are off-track.

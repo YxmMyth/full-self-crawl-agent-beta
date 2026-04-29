@@ -32,7 +32,7 @@ TOOL_PARAMETERS = {
         "location": {
             "type": "string",
             "description": (
-                "Location ID to query (e.g. 'codepen.io::/tag/{tag}'). "
+                "Location ID to query (e.g. 'example.com::/category/{slug}'). "
                 "Omit to get Semantic + Procedural Model. Ignored when run_id is set."
             ),
         },

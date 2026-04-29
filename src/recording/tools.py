@@ -35,7 +35,7 @@ READ_SCHEMA = {
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Location ID (e.g. 'codepen.io::/tag/{tag}'). Omit for all.",
+                    "description": "Location ID (e.g. 'example.com::/category/{slug}'). Omit for all.",
                 },
             },
             "required": [],
@@ -73,8 +73,8 @@ CREATE_SCHEMA = {
         "name": "create_observation",
         "description": (
             "Create a new observation for a location.\n\n"
-            "The location is specified as a pattern string (e.g. '/tag/{tag}', "
-            "'/pen/{id}', '/api/graphql'). The system automatically finds or "
+            "The location is specified as a pattern string (e.g. '/category/{slug}', "
+            "'/{user}/profile', '/api/graphql'). The system automatically finds or "
             "creates the Location record.\n\n"
             "One observation = one fact. Keep them atomic and location-specific."
         ),

@@ -51,7 +51,7 @@ TOOL_PARAMETERS = {
                 "Free-text description of what's needed. Be specific so the human "
                 "knows exactly what to do without guessing.\n"
                 "Good examples:\n"
-                "  - '请用 GitHub OAuth 登录到 codepen,完成后回复'\n"
+                "  - '请用 OAuth/账号密码登录这个站点,完成后回复'\n"
                 "  - '页面弹出 Cloudflare Turnstile 拼图,请点击通过'\n"
                 "  - '需要邮箱验证码,请去收件箱拿 6 位数填进去'\n"
                 "Bad examples:\n"

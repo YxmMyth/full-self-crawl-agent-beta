@@ -35,7 +35,7 @@ TOOL_DESCRIPTION = (
     "  'workspace' → workspace/{save_as}  exploration / debug / scratch\n\n"
     "What counts as each (BE STRICT — verification will check):\n"
     "  sample = ONE concrete instance of the primary data, in native form. "
-    "A list of pen IDs is NOT a sample.\n"
+    "A list of entity IDs is NOT a sample.\n"
     "  catalog = metadata about samples (listings, API responses, IDs, URL maps).\n"
     "  workspace = exploration that may or may not pan out.\n\n"
     "Large results (>50KB) without save_as are auto-saved to workspace/."
@@ -51,7 +51,7 @@ TOOL_PARAMETERS = {
             "type": "string",
             "description": (
                 "FILENAME ONLY (no directory, no '..'). Required-with kind. "
-                "Examples: 'pens.json', 'lion_dom.html', 'extract_result.txt'."
+                "Examples: 'listing.json', 'detail_dom.html', 'extract_result.txt'."
             ),
         },
         "kind": {

@@ -49,14 +49,16 @@ You have 4 tools: read_world_model, bash, think, submit_verdict.
 3. PRIMARY DATA SAMPLED (samples/ only — strict).
    First identify what this site's PRIMARY data is — what a real user comes \
    here to get:
-     - News → article full text
-     - UI Kit market → design files (Figma/Sketch/ZIP)
-     - Image library → image files themselves
-     - Forum → posts + replies
+     - News / blog → article full text
+     - UI Kit / asset marketplace → design files (Figma / Sketch / ZIP)
+     - Image / stock library → image files themselves
+     - Forum / Q&A → posts + replies
      - Video → video file / transcript
      - E-commerce → product specs + reviews
      - Documentation → full doc text
-     - Codepen / source pen sites → the pen's full runnable source
+     - Code sandbox / snippet sharing → runnable source files
+   The list is illustrative; for any site ask "what would a real user open \
+   or download here?" — that's the primary data.
 
    ONLY the `samples/` directory counts as primary data. The agent's \
    tools (fetch / browser_eval) classify writes by kind: samples/ is \
