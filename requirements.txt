@@ -17,7 +17,7 @@ httpx>=0.25.0
 curl_cffi>=0.7.0
 
 # Search (Research Subagent)
-duckduckgo-search>=6.0.0
+ddgs>=9.0.0  # renamed from duckduckgo-search
 
 # Config
 python-dotenv>=1.0.0

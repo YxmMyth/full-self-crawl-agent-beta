@@ -131,7 +131,12 @@ _TOOLS_SCHEMA = [
 
 async def _handle_web_search(query: str, domain: str | None = None) -> str:
     try:
-        from duckduckgo_search import DDGS
+        # `duckduckgo-search` was renamed to `ddgs` upstream. Try the new name
+        # first, fall back to the old one if only the legacy package is installed.
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS  # type: ignore
         with DDGS() as ddgs:
             full_query = f"site:{domain} {query}" if domain else query
             results = list(ddgs.text(full_query, max_results=8))
