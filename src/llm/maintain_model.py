@@ -29,6 +29,12 @@ You receive:
 - Current Semantic Model (site structure, data distribution, relationships)
 - Current Procedural Model (extraction methods, access patterns, tools used)
 - New observations from the latest session
+- (First call only) Prior runs' Procedural Models — cross-run context from
+  previous missions on the same site. Use these as starting hints, but
+  filter aggressively: only carry over domain-level reusable knowledge
+  (URL patterns, methods that worked, auth requirements, known dead-ends).
+  Drop requirement-specific details (sample lists, item IDs, progress
+  counts from past missions).
 
 ## Task
 
@@ -98,6 +104,40 @@ async def maintain_and_summarize(
     new_obs_text = _format_observations(all_observations)
     new_obs_count = len(all_observations)
 
+    # First-call detection — both this run's models empty.
+    # Cross-run inheritance: pull prior runs' Procedural Models as context.
+    # Only on first call (when there's no current run knowledge to merge with).
+    is_first_call = not (current_semantic or current_procedural)
+    prior_block = ""
+    if is_first_call:
+        try:
+            prior_runs = await db.list_runs(domain)
+            relevant = [
+                r for r in prior_runs
+                if r.get("run_id") and r["run_id"] != Config.RUN_ID
+            ][:2]  # 2 most recent prior runs (already sorted DESC by last_obs)
+            chunks: list[str] = []
+            for r in relevant:
+                _, prior_proc = await db.load_both_models(domain, run_id=r["run_id"])
+                if prior_proc:
+                    chunks.append(f"### From run `{r['run_id']}`\n\n{prior_proc}")
+            if chunks:
+                prior_block = (
+                    "\n\n## Prior runs' Procedural Models "
+                    "(cross-run context — first call only)\n\n"
+                    + "\n\n".join(chunks)
+                    + "\n\nFilter when merging into this run's Procedural Model: "
+                    "carry over only DOMAIN-level reusable knowledge (URL "
+                    "patterns, working access methods, auth requirements, "
+                    "known dead-ends). DROP requirement-specific data (sample "
+                    "lists, progress numbers, item IDs from other missions). "
+                    "When in doubt, treat as 'verified hint, may need "
+                    "re-validation in this run'."
+                )
+                logger.info(f"maintain_model: injecting prior context from {len(chunks)} prior run(s)")
+        except Exception as e:
+            logger.warning(f"maintain_model: prior-run context load failed: {e}")
+
     # Build prompt
     prompt_parts = []
 
@@ -112,6 +152,9 @@ async def maintain_and_summarize(
         prompt_parts.append(f"## Current Procedural Model\n\n{current_procedural}")
     else:
         prompt_parts.append("## Current Procedural Model\n\n(empty — first session)")
+
+    if prior_block:
+        prompt_parts.append(prior_block)
 
     prompt_parts.append(f"\n## New Observations ({new_obs_count} total)\n\n{new_obs_text}")
 

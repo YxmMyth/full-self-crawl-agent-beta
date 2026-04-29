@@ -87,8 +87,18 @@ spawn_research to find out before sending the execution agent blindly.
 - PRIOR RUNS ARE READ-ONLY. Other runs on this domain live at \
 `artifacts/{domain}/runs/*/`. They have their own samples/, sessions/, \
 verification/ etc., and their Models are accessible via \
-read_model(run_id=...). Borrow context if useful, but you write only to \
-your own run; you cannot modify other runs' artifacts."""
+read_model(run_id=...). You write only to your own run; you cannot modify \
+other runs' artifacts.
+
+- SESSION 0 PROTOCOL (when prior runs exist). Before your first \
+spawn_execution, scan the "Prior runs of this domain" list in the user \
+message and call read_model(run_id=...) on the prior runs that look \
+relevant to the CURRENT requirement. Absorb URL patterns, methods that \
+worked, known auth requirements, and known dead-ends. Skip details \
+specific to past requirements (sample lists, progress numbers, item IDs). \
+Bake the relevant prior knowledge into your first briefing's CONTEXT \
+section so the execution agent doesn't waste rounds re-discovering what's \
+already known. If no prior runs exist, skip this protocol."""
 
 
 # ── Tool schemas ─────────────────────────────────────────
@@ -233,6 +243,11 @@ class ReconPlanner:
             extra={"domain": self.domain},
         )
 
+        # Inject prior runs' run_id list (cross-run inheritance entrypoint).
+        # Planner's prompt has a Session-0 Protocol that tells it to read the
+        # relevant ones via read_model(run_id=...).
+        await self._inject_prior_runs_menu()
+
         outcome = "unknown"
         try:
             outcome = await self._main_loop()
@@ -358,6 +373,41 @@ class ReconPlanner:
     async def _spawn_research(self, topic: str, questions: str) -> str:
         result = await run_research(self.llm, self.domain, topic, questions)
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    async def _inject_prior_runs_menu(self) -> None:
+        """Append a list of prior run_ids to the initial user message.
+
+        Cross-run inheritance entrypoint. The Planner's prompt instructs it
+        (via the SESSION 0 PROTOCOL line) to read the relevant ones via
+        read_model(run_id=...). We only provide the list — the Planner LLM
+        decides which prior runs are worth reading for the current
+        requirement.
+        """
+        try:
+            prior_runs = await db.list_runs(self.domain)
+        except Exception as e:
+            logger.warning(f"Could not list prior runs: {e}")
+            return
+        # Exclude self
+        others = [r for r in prior_runs if r.get("run_id") and r["run_id"] != Config.RUN_ID]
+        if not others:
+            return
+        # Cap at 5 most recent (already sorted DESC by last_obs)
+        others = others[:5]
+        lines: list[str] = []
+        for r in others:
+            last = r.get("last_obs")
+            last_str = last.isoformat(timespec="minutes") if last else "(no observations)"
+            tag = " [has_models]" if r.get("has_models") else ""
+            lines.append(f"  - {r['run_id']}  (last touched: {last_str}){tag}")
+        block = (
+            "\n\n## Prior runs of this domain (read-only)\n"
+            + "\n".join(lines)
+        )
+        # Append to existing user message (index 1; index 0 is system)
+        if len(self.messages) >= 2 and self.messages[1].get("role") == "user":
+            self.messages[1]["content"] = self.messages[1]["content"] + block
+        logger.info(f"Injected {len(others)} prior runs into Planner initial context")
 
     async def _read_model(self, run_id: str | None = None) -> str:
         semantic, procedural = await db.load_both_models(self.domain, run_id=run_id)
