@@ -41,13 +41,23 @@ class LLMResponse:
         """Build an OpenAI-format assistant message from this response,
         suitable for appending to the messages array of the next API call.
 
-        Echoes back reasoning_content (DeepSeek thinking-mode models REQUIRE
-        the prior turn's reasoning_content to be present in the assistant
-        message; the API rejects calls that drop it with HTTP 400).
+        Echoes back reasoning_content. DeepSeek thinking-mode models (e.g.
+        deepseek-v4-pro) REQUIRE the prior turn's reasoning_content to be
+        present AND non-empty on every assistant message in the history —
+        if the key is missing OR the value is "", the API returns HTTP 400:
+          "The `reasoning_content` in the thinking mode must be passed
+           back to the API."
+        So we always emit the key, with a placeholder when the model didn't
+        return one. Non-thinking models ignore the field harmlessly.
 
-        Returns a dict with role + whatever fields are populated. Caller is
-        responsible for ensuring the message has at least content or
-        tool_calls (some providers reject pure-empty assistant messages).
+        Empirically validated against the gateway:
+          missing key       → 400
+          value == ""       → 400
+          value with spaces → OK (server doesn't introspect content)
+
+        Returns a dict with role + populated fields. Caller is responsible
+        for ensuring the message has at least content or tool_calls (some
+        providers reject pure-empty assistant messages).
         """
         msg: dict[str, Any] = {"role": "assistant"}
         if self.content:
@@ -64,8 +74,8 @@ class LLMResponse:
                 }
                 for tc in self.tool_calls
             ]
-        if self.reasoning:
-            msg["reasoning_content"] = self.reasoning
+        # Always emit reasoning_content — required-non-empty by thinking-mode APIs.
+        msg["reasoning_content"] = self.reasoning if self.reasoning else "(no thinking captured)"
         return msg
 
 
@@ -263,8 +273,19 @@ class LLMClient:
 
             except APIStatusError as e:
                 last_error = e
-                # content_filter or moderation error — retry
-                if "content_filter" in str(e).lower() or e.status_code == 400:
+                # Only retry on actual content_filter / moderation errors. A
+                # bare 400 is usually a schema problem (bad messages, missing
+                # required field, etc.) — retrying with the same payload just
+                # wastes 3 attempts before raising the real error. The earlier
+                # "any 400 → retry" rule masked a reasoning_content schema bug
+                # for hours before we noticed.
+                err_str = str(e).lower()
+                is_content_filter = (
+                    "content_filter" in err_str
+                    or "content filter" in err_str
+                    or "moderation" in err_str
+                )
+                if is_content_filter:
                     logger.warning(
                         f"Content filter hit (attempt {attempt + 1}/{max_retries}), retrying in 2s",
                         extra={"error": str(e)},
@@ -272,7 +293,7 @@ class LLMClient:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2)
                         continue
-                # Other API errors — don't retry
+                # Other API errors — don't retry, surface immediately
                 logger.error(f"LLM API error: {e}", extra={"error": str(e)})
                 raise
 
