@@ -230,9 +230,11 @@ async def run_research(
         if response is None:
             break
 
-        # Build assistant message (echoes reasoning_content for thinking models)
-        if response.content:
-            findings_text = response.content  # last content = final findings
+        # response.text handles the content/reasoning_content split
+        # (thinking-mode models emit narration in reasoning_content during
+        # tool-using rounds — see LLMResponse.text).
+        if response.text:
+            findings_text = response.text
         messages.append(response.to_assistant_message())
 
         if not response.tool_calls:
@@ -252,6 +254,26 @@ async def run_research(
                 result = f"Unknown tool: {tc.name}"
 
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+
+    # Forced final synthesis. Even with response.text fallback, the loop may
+    # have ended via max_rounds or an empty round — without a polished report
+    # turn. This guarantees one clean "write the report now" round at the end.
+    # (This is research workflow, not a model quirk — content/reasoning split
+    # is handled by LLMResponse.text upstream.)
+    if not findings_text:
+        messages.append({
+            "role": "user",
+            "content": (
+                "End of investigation. Write the final research report now as your "
+                "response (no tool calls). Cover: confirmed facts with source URLs, "
+                "relevant API/code/access details, remaining gaps, suggested next steps "
+                "for the execution agent. Be concrete — concrete URLs, concrete "
+                "endpoints, concrete code snippets, not just summaries."
+            ),
+        })
+        synth = await llm.chat_with_tools(messages, [])  # empty tools = forced text
+        if synth:
+            findings_text = synth.text
 
     # Save report
     report_content = findings_text or "(No findings produced)"

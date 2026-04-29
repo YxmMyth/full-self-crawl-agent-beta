@@ -37,6 +37,26 @@ class LLMResponse:
     reasoning: str | None = None  # deepseek reasoning_content if present
     usage: TokenUsage | None = None
 
+    @property
+    def text(self) -> str:
+        """Best-effort textual output, model-quirk-aware.
+
+        Thinking-mode models (e.g. deepseek-v4-pro) often emit their narration
+        in `reasoning_content` and leave `content` empty during tool-using
+        rounds — and sometimes even on the final round. Agents asking
+        "what did the model say textually" should use this instead of
+        `.content` so they don't get an empty string just because the model
+        chose a different field.
+
+        This is the centralized place for the content/reasoning quirk —
+        agents don't need to know which model is which.
+        """
+        if self.content:
+            return self.content
+        if self.reasoning:
+            return self.reasoning
+        return ""
+
     def to_assistant_message(self) -> dict[str, Any]:
         """Build an OpenAI-format assistant message from this response,
         suitable for appending to the messages array of the next API call.
