@@ -35,9 +35,9 @@ _SYSTEM_PROMPT = """You are a reconnaissance planner. You direct the systematic 
 of a target website to build understanding of its structure, data, and \
 access methods.
 
-You have 5 tools: spawn_execution, spawn_research, read_model, think, \
-mark_done. You do NOT operate the browser, maintain observations, or \
-update models — other components handle those automatically.
+You have 6 tools: spawn_execution, spawn_research, read_model, read_state, \
+think, mark_done. You do NOT operate the browser, maintain observations, \
+or update models — other components handle those automatically.
 
 ## Reconnaissance Stages
 
@@ -53,13 +53,19 @@ exploration (L1-L2). Later sessions target specific gaps (L3-L4).
 ## How to Decide
 
 After each spawn_execution or spawn_research returns:
-1. Read the returned summary and model_diff
-2. think() — assess: what did we learn? what's still unknown?
-3. If you need the full picture → read_model()
+1. Read the returned summary, model_diff, AND state_delta. The state_delta \
+is the FACT of what landed on disk this session — it overrides the LLM's \
+narrative summary when the two disagree.
+2. think() — assess: what did we learn? what's still unknown? what's \
+already on disk vs what's still missing?
+3. If you need the full picture → read_model() for understanding, or \
+read_state() for the actual file inventory across samples/, catalog/, \
+workspace/.
 4. Decide next action:
    - More unknowns → spawn_execution with a focused briefing
    - Need external info (API docs, tech stack) → spawn_research
-   - Model looks complete against requirement → mark_done
+   - samples/ already has the deliverables for the requirement → mark_done. \
+Do NOT spawn another execution to re-confirm what's already on disk.
 
 mark_done may be rejected with specific gaps. Address those gaps \
 and continue.
@@ -159,6 +165,34 @@ _TOOLS_SCHEMA = [
                     "run_id": {
                         "type": "string",
                         "description": "Optional. Read another run's Model (read-only).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_state",
+            "description": (
+                "List actual artifact files on disk — facts, not LLM summaries.\n\n"
+                "Returns size + mtime + filename for each file under the run's "
+                "samples/, catalog/, workspace/. Use this to ground decisions in "
+                "what's REALLY there: how many primary samples landed, what "
+                "listings already exist, what debug dumps accumulated.\n\n"
+                "kind='all' (default): brief overview of all three dirs (top 10 each)\n"
+                "kind='samples'|'catalog'|'workspace': detailed listing of one dir (top 50)\n\n"
+                "Use before deciding what to spawn next. If samples/ already has the "
+                "deliverables you'd need to mark_done, don't spawn another execution."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "samples", "catalog", "workspace"],
+                        "description": "Which dir to list. Default 'all'.",
                     },
                 },
                 "required": [],
@@ -324,6 +358,8 @@ class ReconPlanner:
                 return await self._spawn_research(args.get("topic", ""), args.get("questions", ""))
             elif name == "read_model":
                 return await self._read_model(args.get("run_id"))
+            elif name == "read_state":
+                return self._read_state(args.get("kind", "all"))
             elif name == "think":
                 return json.dumps({"thought": args.get("thought", "")})
             elif name == "mark_done":
@@ -335,11 +371,20 @@ class ReconPlanner:
             return f"Error: {e}"
 
     async def _spawn_execution(self, briefing: str) -> str:
-        """Full pipeline: session → recording → maintain_model → return summary."""
+        """Full pipeline: session → recording → maintain_model → return summary.
+
+        Captures artifact filesystem state before and after the session, and
+        includes a `state_delta` block in the result so the Planner sees the
+        FACT of what landed on disk — not just the LLM's narrative summary.
+        This breaks the "Planner only sees LLM-described progress" problem.
+        """
         self.session_count += 1
         session_id = f"s{self.session_count:03d}_{uuid.uuid4().hex[:6]}"
 
         logger.info(f"Spawning execution session {session_id}")
+
+        # Snapshot artifact dirs BEFORE the session runs
+        before = self._snapshot_artifacts()
 
         # Create and run session
         session = AgentSession(
@@ -359,6 +404,10 @@ class ReconPlanner:
         # maintain_model: update Semantic + Procedural models
         model_result = await maintain_and_summarize(self.llm, self.domain, session_id)
 
+        # Snapshot AFTER and diff
+        after = self._snapshot_artifacts()
+        delta = self._diff_artifacts(before, after)
+
         result = {
             "summary": model_result.get("summary", ""),
             "model_diff": model_result.get("model_diff", ""),
@@ -366,6 +415,7 @@ class ReconPlanner:
             "session_id": session_id,
             "session_outcome": session_result["outcome"],
             "session_steps": session_result["steps_taken"],
+            "state_delta": delta,
         }
 
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -373,6 +423,109 @@ class ReconPlanner:
     async def _spawn_research(self, topic: str, questions: str) -> str:
         result = await run_research(self.llm, self.domain, topic, questions)
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    # ── Artifact state visibility (samples/ catalog/ workspace/) ──
+
+    _ARTIFACT_DIRS = ("samples", "catalog", "workspace")
+
+    def _snapshot_artifacts(self) -> dict[str, dict[str, dict]]:
+        """Snapshot the run's artifact dirs as {dir: {filename: {size, mtime}}}.
+
+        Plain os.listdir + stat. No recursion (top-level only — agents
+        normally save flat). Cheap to call before/after each session.
+        """
+        run_dir = Config.run_dir(self.domain)
+        snap: dict[str, dict[str, dict]] = {}
+        for d in self._ARTIFACT_DIRS:
+            entry: dict[str, dict] = {}
+            full = run_dir / d
+            if full.exists() and full.is_dir():
+                for p in full.iterdir():
+                    if p.is_file():
+                        try:
+                            st = p.stat()
+                            entry[p.name] = {"size": st.st_size, "mtime": st.st_mtime}
+                        except Exception:
+                            pass
+            snap[d] = entry
+        return snap
+
+    @staticmethod
+    def _human_size(n: int) -> str:
+        if n < 1024:
+            return f"{n}B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.1f}KB"
+        if n < 1024**3:
+            return f"{n / (1024**2):.1f}MB"
+        return f"{n / (1024**3):.2f}GB"
+
+    def _diff_artifacts(
+        self,
+        before: dict[str, dict[str, dict]],
+        after: dict[str, dict[str, dict]],
+    ) -> dict[str, Any]:
+        """Compute what was added per dir during a session.
+
+        Returns a dict with per-dir 'added' filename lists and 'totals_now'.
+        Modifications (same name, larger size) count as added too — agents
+        sometimes overwrite a file across sessions.
+        """
+        delta: dict[str, Any] = {"totals_now": {}}
+        for d in self._ARTIFACT_DIRS:
+            b = before.get(d, {})
+            a = after.get(d, {})
+            added: list[str] = []
+            for name, meta in a.items():
+                if name not in b or b[name].get("size") != meta.get("size"):
+                    added.append(f"{name} ({self._human_size(meta['size'])})")
+            # Stable order: by mtime desc
+            added.sort(key=lambda s: a.get(s.split(" (", 1)[0], {}).get("mtime", 0), reverse=True)
+            delta[f"{d}_added"] = added
+            delta["totals_now"][d] = len(a)
+        return delta
+
+    def _read_state(self, kind: str = "all") -> str:
+        """Render artifact filesystem state as text for the Planner.
+
+        Output format inspired by Claude Code's GlobTool: relative names,
+        sizes, mtime — no raw bytes, no recursion. Caps:
+          - 'all' mode shows up to 10 newest files per dir + totals
+          - per-dir mode shows up to 50 newest files
+        """
+        kind = (kind or "all").strip().lower()
+        if kind not in ("all", "samples", "catalog", "workspace"):
+            return f"Error: kind must be one of all/samples/catalog/workspace, got '{kind}'."
+
+        snap = self._snapshot_artifacts()
+
+        def fmt_dir(d: str, cap: int) -> str:
+            entries = snap.get(d, {})
+            count = len(entries)
+            total_bytes = sum(m.get("size", 0) for m in entries.values())
+            header = f"=== {d}/ ({count} file{'s' if count != 1 else ''}, {self._human_size(total_bytes)}) ==="
+            if not entries:
+                return f"{header}\n  (empty)"
+            # Sort by mtime desc
+            sorted_items = sorted(entries.items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
+            lines = [header]
+            shown = sorted_items[:cap]
+            # Compute mtime relative format
+            from datetime import datetime
+            for name, meta in shown:
+                size = self._human_size(meta.get("size", 0))
+                try:
+                    ts = datetime.fromtimestamp(meta.get("mtime", 0)).strftime("%H:%M")
+                except Exception:
+                    ts = "?"
+                lines.append(f"  {size:>8}  {ts}  {name}")
+            if count > cap:
+                lines.append(f"  ... ({count - cap} more — call read_state(kind='{d}') for full list)")
+            return "\n".join(lines)
+
+        if kind == "all":
+            return "\n".join(fmt_dir(d, cap=10) for d in self._ARTIFACT_DIRS)
+        return fmt_dir(kind, cap=50)
 
     async def _inject_prior_runs_menu(self) -> None:
         """Append a list of prior run_ids to the initial user message.
