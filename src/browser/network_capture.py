@@ -3,11 +3,26 @@
 Captures JSON/GraphQL API responses, filters tracking and static assets.
 Must use page.on('response'), NOT page.route() — the latter triggers anti-bot detection.
 
-See: docs/browse工具深度设计报告.md §三
+DESIGN INVARIANTS (per docs/抽象边界原则.md):
+  1. Observer is LOSSY. Body fetch has a timeout — slow/streaming responses
+     get dropped, never block the callback or pile up tasks.
+  2. Observer is SILENT. Any exception in the callback is logged at DEBUG
+     and swallowed — never propagated to pyee (which would log ERROR per
+     event and add scheduler/traceback overhead). Capture failures are
+     infrastructure mechanics, not semantic signals; the agent has no
+     useful reaction to them.
+
+Without these, high-traffic sites (e.g. Douyin's logged-in feed pages emit
+50-200 requests/sec, many of them long-lived video streams) overwhelm the
+asyncio scheduler — `await response.body()` blocks indefinitely on streams,
+tasks accumulate, and the agent's main loop can't get scheduling time.
+
+See: docs/browse工具深度设计报告.md §三, docs/抽象边界原则.md
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -137,6 +152,13 @@ def _graphql_operation(body: str | None) -> str | None:
 # ── Setup ────────────────────────────────────────────────
 
 
+# Body fetch timeout. Streaming responses (video chunks, SSE, long-poll) can
+# block forever — without this, those tasks accumulate one-per-response and
+# starve the asyncio scheduler. 3s is generous for any real API; bytes-not-
+# back-by-now means it's a stream we don't want anyway.
+_BODY_FETCH_TIMEOUT_S = 3.0
+
+
 def setup_network_capture(page: Page, ctx: ToolContext) -> None:
     """Register passive response listener on a page.
 
@@ -144,49 +166,65 @@ def setup_network_capture(page: Page, ctx: ToolContext) -> None:
     """
 
     async def on_response(response: Response) -> None:
-        url = response.url
-        content_type = response.headers.get("content-type", "")
-        method = response.request.method
-
-        # Filter tracking
-        if _is_tracking(url):
-            ctx.network_filtered_count["tracking"] += 1
-            return
-
-        # Filter static assets
-        if _is_static(content_type):
-            ctx.network_filtered_count["static"] += 1
-            return
-
-        # Only capture data API responses
-        if not _is_data_api(url, content_type, method):
-            return
-
+        # SILENT observer: any exception (including from accessing fields of
+        # destroyed Request/Response objects on cancelled requests) is caught
+        # here. pyee.AsyncIOEventEmitter would otherwise log ERROR per event
+        # — see module docstring.
         try:
-            body = await response.body()
-        except Exception:
-            # Response body may not be available (e.g., redirects)
-            body = b""
+            url = response.url
+            content_type = response.headers.get("content-type", "")
+            method = response.request.method
 
-        item_count = _count_items(body)
-        request_body = response.request.post_data if method == "POST" else None
-        path = urlparse(url).path
-        query = urlparse(url).query
-        if query:
-            path = f"{path}?{query}"
+            # Filter tracking
+            if _is_tracking(url):
+                ctx.network_filtered_count["tracking"] += 1
+                return
 
-        capture = CapturedRequest(
-            method=method,
-            url=url,
-            path=path,
-            request_body=request_body,
-            status=response.status,
-            content_type=content_type,
-            response_size=len(body),
-            item_count=item_count,
-            response_preview=body[:1000].decode("utf-8", errors="replace"),
-        )
-        ctx.network_captures.append(capture)
+            # Filter static assets
+            if _is_static(content_type):
+                ctx.network_filtered_count["static"] += 1
+                return
+
+            # Only capture data API responses
+            if not _is_data_api(url, content_type, method):
+                return
+
+            # LOSSY: bounded await. Streams/long-polls that don't deliver
+            # within timeout are dropped. The capture proceeds with empty
+            # body — we still record metadata, just no preview.
+            try:
+                body = await asyncio.wait_for(
+                    response.body(), timeout=_BODY_FETCH_TIMEOUT_S,
+                )
+            except (asyncio.TimeoutError, Exception):
+                # TimeoutError (stream didn't end) | playwright Error
+                # (response destroyed / redirect / etc.) — both lossy.
+                body = b""
+
+            item_count = _count_items(body)
+            request_body = response.request.post_data if method == "POST" else None
+            path = urlparse(url).path
+            query = urlparse(url).query
+            if query:
+                path = f"{path}?{query}"
+
+            capture = CapturedRequest(
+                method=method,
+                url=url,
+                path=path,
+                request_body=request_body,
+                status=response.status,
+                content_type=content_type,
+                response_size=len(body),
+                item_count=item_count,
+                response_preview=body[:1000].decode("utf-8", errors="replace"),
+            )
+            ctx.network_captures.append(capture)
+        except Exception as e:
+            # Mechanical capture failure (destroyed object access, list mutation
+            # races, etc.) — not a semantic signal for the agent. Debug-level
+            # only; never let it become an ERROR row in stderr.
+            logger.debug(f"network capture skipped: {type(e).__name__}: {e}")
 
     page.on("response", on_response)
 
