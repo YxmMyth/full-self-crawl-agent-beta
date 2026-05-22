@@ -46,6 +46,7 @@ from src.agent.tools import (
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
+from src.harvest.checklist import compile_checklist
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
 from src.runtime.human_assist import TkinterPopupGateway
@@ -272,6 +273,17 @@ async def run_harvest(
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
+
+    # Compile acceptance checklist from requirement (replaces the old LLM
+    # verifier subagent). One LLM call up front; mark_done then runs the
+    # mechanical checks. If this fails, a stub is written and the harvest
+    # still proceeds — better partial verification than none.
+    workspace = run_dir / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    samples_dir = run_dir / "samples"
+    checklist_path = workspace / "checklist.md"
+    ok = await compile_checklist(llm, requirement, samples_dir, checklist_path)
+    logger.info(f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: {checklist_path}")
 
     # Attach deps for mark_done (it reads these off ctx to call verification)
     ctx._llm = llm
