@@ -400,6 +400,13 @@ class AgentSession:
                 logger.info("Session ended: mission_done signaled by mark_done")
                 break
 
+            # Safety-net signal (set by external watchdog: wall clock, tool cap, etc.)
+            if getattr(self.ctx, "_safety_stop", False):
+                self.outcome = OUTCOME_SAFETY
+                reason = getattr(self.ctx, "_safety_reason", "unspecified")
+                logger.warning(f"Session ended: safety_stop - {reason}")
+                break
+
             # Check stop conditions
             if self.consecutive_errors >= 5:
                 self.outcome = OUTCOME_ERRORS
