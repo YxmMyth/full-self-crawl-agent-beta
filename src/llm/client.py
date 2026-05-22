@@ -153,8 +153,9 @@ class LLMClient:
         self._client = AsyncOpenAI(
             api_key=Config.LLM_API_KEY,
             base_url=Config.LLM_BASE_URL,
-            timeout=120.0,
-            max_retries=2,  # SDK-level retries for transient network errors
+            timeout=240.0,
+            max_retries=8,  # SDK-level retries — long-run harvest can hit gateway
+                            # TPM throttling; 8 retries cover ~minutes of backoff
         )
         self.usage = UsageTracker()
 
