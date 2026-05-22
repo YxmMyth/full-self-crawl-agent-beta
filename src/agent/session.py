@@ -238,6 +238,7 @@ class AgentSession:
         registry: ToolRegistry,
         browser_manager: Any = None,
         recording_agent: Any = None,
+        system_prompt: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.run_id = run_id
@@ -255,7 +256,7 @@ class AgentSession:
 
         # Message array — the agent's working memory
         self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": briefing},
         ]
 
