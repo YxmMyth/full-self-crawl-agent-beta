@@ -577,6 +577,7 @@ class ReconPlanner:
                 self.llm, self.domain, self.requirement, reason,
             )
             if verdict == "PASS":
+                await self._emit_strategy_report()
                 return json.dumps({"status": "DONE"})
             else:
                 return json.dumps({
@@ -586,7 +587,68 @@ class ReconPlanner:
                     "message": "Verification found gaps. Address them and try again.",
                 })
         else:
+            await self._emit_strategy_report()
             return json.dumps({"status": "DONE"})
+
+    async def _emit_strategy_report(self) -> None:
+        """Write a human-readable strategy report after recon PASS.
+
+        Read by the gate (CLI prompt between recon and harvest) so the
+        operator can decide: continue / stop / edit requirement. Failure
+        to generate the report does NOT block DONE — recon is complete
+        regardless.
+        """
+        try:
+            semantic, procedural = await db.load_both_models(self.domain)
+
+            samples_dir = Config.run_dir(self.domain) / "samples"
+            sample_count = 0
+            sample_listing = "(none)"
+            if samples_dir.is_dir():
+                files = sorted(p for p in samples_dir.iterdir() if p.is_file())
+                sample_count = len(files)
+                if files:
+                    sample_listing = "\n".join(
+                        f"- {p.name} ({p.stat().st_size} bytes)" for p in files[:20]
+                    )
+                    if sample_count > 20:
+                        sample_listing += f"\n... ({sample_count - 20} more)"
+
+            system_prompt = (
+                "You are summarizing reconnaissance results for a human operator "
+                "who is about to decide whether to start the harvest stage. Be "
+                "concrete and brief — at most 30 lines of markdown. Answer:\n"
+                "1. What is the primary data on this site?\n"
+                "2. What access methods were discovered (rank from easiest to hardest)?\n"
+                "3. What auth is required (none / cookies / login / 2FA)?\n"
+                "4. What anti-bot defenses were observed?\n"
+                "5. How many samples are on disk? In what format?\n"
+                "6. Estimated total data volume if recon discovered it.\n"
+                "7. Any specific concerns the operator should know before harvest.\n\n"
+                "Do NOT recommend a harvest tier or specific tools — the harvest "
+                "agent decides its own approach. Stick to facts and observations."
+            )
+            user_msg = (
+                f"## Requirement\n{self.requirement}\n\n"
+                f"## Semantic Model\n{semantic or '(empty)'}\n\n"
+                f"## Procedural Model\n{procedural or '(empty)'}\n\n"
+                f"## Samples ({sample_count})\n{sample_listing}"
+            )
+
+            response_text = await self.llm.generate(prompt=user_msg, system=system_prompt)
+            report_text = response_text or "(LLM produced empty report)"
+        except Exception as e:
+            logger.warning(f"strategy_report generation failed: {e}")
+            report_text = (
+                f"# Strategy Report (generation failed)\n\n"
+                f"Recon completed but the LLM call to summarize failed: {e}\n\n"
+                f"Read the World Model directly via "
+                f"`read_world_model` or query the DB for context."
+            )
+
+        report_path = Config.run_dir(self.domain) / "strategy_report.md"
+        report_path.write_text(report_text, encoding="utf-8")
+        logger.info(f"Strategy report written to {report_path}")
 
     # ── Microcompact ─────────────────────────────────────
 
