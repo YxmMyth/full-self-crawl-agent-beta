@@ -1,21 +1,20 @@
 """mark_done — harvest agent claims mission complete.
 
-Internally triggers the harvest Verification subagent. On PASS, sets
-ctx._mission_done so AgentSession's loop exits. On FAIL/PARTIAL, the
-tool result returns specific gaps and the agent continues.
+Runs the checklist mechanical verifier (no LLM in the loop). On all-PASS,
+sets ctx._mission_done so AgentSession's loop exits. On any FAIL, returns
+the specific failed criteria as the tool result and the agent continues.
+
+The checklist (workspace/checklist.md) is compiled from requirement.txt
+by the harvest launcher at mission start. mark_done parses + runs it.
 
 Feature-gated by Config.VERIFICATION_SUBAGENT_ENABLED — when disabled,
 mark_done auto-passes (useful for testing without spending LLM calls
-on verification).
+on the launcher's checklist compile step).
 
-Requires the following attributes on ctx:
+Requires the following attribute on ctx (attached by harvest launcher):
   - ctx._domain      : the domain string
-  - ctx._llm         : a LLMClient instance
-  - ctx._requirement : the requirement string (boundary spec)
 
-These are attached by the harvest launcher before running AgentSession.
-
-See: docs/工具重新设计共识.md §2.2c
+See: src/harvest/checklist.py for the parse + run engine.
 """
 
 from __future__ import annotations
@@ -30,17 +29,18 @@ logger = get_logger(__name__)
 TOOL_NAME = "mark_done"
 TOOL_DESCRIPTION = (
     "Claim the harvest mission is complete.\n\n"
-    "Triggers an adversarial Verification subagent that independently checks "
-    "your workspace against the requirement boundary and the recon samples. "
-    "It will look for: short counts, missing fields, stub records, missing "
-    "reproducibility code.\n\n"
+    "Runs the acceptance checklist at workspace/checklist.md — a set of "
+    "concrete bash checks (file counts, shape match, content non-empty, etc.) "
+    "compiled from the requirement at mission start. Each check is a bash "
+    "command; exit 0 means PASS.\n\n"
     "Returns one of:\n"
-    "  - PASS: mission accepted, harvest ends.\n"
-    "  - FAIL: significant gaps reported; you continue and address them.\n"
-    "  - PARTIAL: usable but limited; you continue to close named gaps.\n\n"
-    "Don't call this optimistically — the verifier will catch corner-cutting "
-    "and you'll waste a round. Verify yourself first (count, shape, sample-check) "
-    "before claiming done."
+    "  - PASS: all criteria satisfied → harvest ends.\n"
+    "  - FAIL: lists specific failed criteria (id, criterion, check command, "
+    "exit code, output) → you fix the underlying gaps and call mark_done again.\n\n"
+    "Before calling, read `workspace/checklist.md` yourself, run each check "
+    "command via bash to confirm it passes — that way you avoid round-trips "
+    "through this tool. If you're unsure whether the check WILL pass, you're "
+    "not done."
 )
 TOOL_PARAMETERS = {
     "type": "object",
@@ -48,8 +48,9 @@ TOOL_PARAMETERS = {
         "reason": {
             "type": "string",
             "description": (
-                "Brief explanation of what you accomplished and why you "
-                "believe the mission is complete. The verifier reads this."
+                "Brief explanation of what you accomplished. Logged with the "
+                "verdict; if the checklist FAILs, this is preserved for the "
+                "next mark_done attempt."
             ),
         },
     },
@@ -62,37 +63,57 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
     if not reason:
         return "Error: mark_done requires a non-empty `reason`."
 
-    # Feature gate — when disabled, mark_done auto-passes.
-    if not Config.VERIFICATION_SUBAGENT_ENABLED:
-        ctx._mission_done = True
-        logger.info("mark_done: verification subagent disabled, auto-PASS")
-        return f"VERIFICATION SKIPPED (feature disabled). Mission marked complete: {reason}"
-
     domain = getattr(ctx, "_domain", None)
-    llm = getattr(ctx, "_llm", None)
-    requirement = getattr(ctx, "_requirement", None)
-
-    if not domain or llm is None or requirement is None:
-        # Misconfigured launcher — fail loudly so the bug surfaces.
-        missing = [
-            name for name, val in [("_domain", domain), ("_llm", llm), ("_requirement", requirement)]
-            if not val
-        ]
+    if not domain:
         return (
-            f"Error: mark_done cannot run verification — missing ctx attributes: "
-            f"{', '.join(missing)}. This is a launcher bug, not your fault. "
-            "Continue trying other approaches; the user will need to fix the launcher."
+            "Error: mark_done cannot run — ctx._domain missing. "
+            "This is a launcher bug, not your fault."
         )
 
-    from src.harvest.verification import run_harvest_verification
+    workspace = Config.run_dir(domain) / "workspace"
+    checklist_path = workspace / "checklist.md"
 
-    verdict, feedback = await run_harvest_verification(llm, domain, requirement, reason)
-
-    if verdict == "PASS":
+    # Feature gate — bypass entirely when verification is disabled
+    if not Config.VERIFICATION_SUBAGENT_ENABLED:
         ctx._mission_done = True
-        return f"VERIFICATION PASS. Mission complete.\n\n{feedback}"
+        logger.info("mark_done: verification disabled, auto-PASS")
+        return f"VERIFICATION SKIPPED (feature disabled). Mission marked complete.\nReason: {reason}"
+
+    # Lazy import to avoid coupling the tool module to harvest internals
+    from src.harvest.checklist import run_all_checks, format_results
+
+    results = await run_all_checks(checklist_path, workspace)
+
+    if not results:
+        # No checklist or it parsed to 0 criteria — fall back to agent claim.
+        # The launcher would normally have written at least a stub; if even
+        # that is missing, we don't block the mission.
+        ctx._mission_done = True
+        logger.warning(
+            f"mark_done: no checklist criteria at {checklist_path}, "
+            "auto-PASS based on agent reason"
+        )
+        return (
+            f"VERIFICATION SKIPPED — no parseable checklist at "
+            f"{checklist_path}. Mission marked complete based on agent reason.\n\n"
+            f"Reason: {reason}"
+        )
+
+    all_passed = all(r.passed for r in results)
+    summary = format_results(results)
+    logger.info(
+        f"mark_done checklist: {sum(r.passed for r in results)}/{len(results)} "
+        f"PASS, all_passed={all_passed}"
+    )
+
+    if all_passed:
+        ctx._mission_done = True
+        return f"VERIFICATION PASS.\n\n{summary}\n\nAgent reason: {reason}"
 
     return (
-        f"VERIFICATION {verdict}. The mission is NOT yet complete. "
-        f"Continue and address these:\n\n{feedback}"
+        f"VERIFICATION FAIL — the mission is NOT yet complete.\n\n"
+        f"{summary}\n\n"
+        "Fix each failed criterion (run the failing `check` command yourself "
+        "via bash to inspect, then apply_patch / bash to address the gap), "
+        "then call mark_done again."
     )
