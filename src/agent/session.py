@@ -222,6 +222,7 @@ OUTCOME_NATURAL = "natural_stop"
 OUTCOME_CONTEXT = "context_exhausted"
 OUTCOME_ERRORS = "consecutive_errors"
 OUTCOME_SAFETY = "safety_net"
+OUTCOME_DONE = "mission_done"  # set by mark_done tool on Verification PASS
 
 
 class AgentSession:
@@ -392,6 +393,12 @@ class AgentSession:
 
             # Push transcript increment to Recording Agent (non-blocking)
             await self._push_to_recording(response)
+
+            # Mission-complete signal from mark_done (harvest mode)
+            if getattr(self.ctx, "_mission_done", False):
+                self.outcome = OUTCOME_DONE
+                logger.info("Session ended: mission_done signaled by mark_done")
+                break
 
             # Check stop conditions
             if self.consecutive_errors >= 5:
