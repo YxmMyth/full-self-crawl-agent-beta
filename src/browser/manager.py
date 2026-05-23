@@ -20,6 +20,8 @@ See: 架构共识文档.md §六 浏览器环境与策略
 
 from __future__ import annotations
 
+import asyncio
+import platform
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +209,36 @@ class BrowserManager:
             except Exception:
                 pass
             self._playwright = None
+
+        # Defensive: AsyncCamoufox.__aexit__ doesn't reliably terminate the
+        # underlying Firefox process on Windows. Without this, repeated
+        # browser_reset() calls during a long mission accumulate zombie
+        # camoufox.exe that hold the profile lock — fresh launches then
+        # silently fail with "Target page, context or browser has been
+        # closed" within seconds. (Observed 2026-05-23 harvest 100-scope run:
+        # 8 zombies accumulated over 18 minutes, forced human_assist popups.)
+        # MVP assumes one mission at a time, so process-name kill is safe.
+        # Switch to PID-tracking when concurrent missions land.
+        try:
+            cmd = (
+                ["taskkill", "/F", "/IM", "camoufox.exe"]
+                if platform.system() == "Windows"
+                else ["pkill", "-f", "camoufox"]
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except Exception as e:
+            logger.debug(f"Residual Camoufox cleanup skipped: {e}")
+
+        for name in ("parent.lock", ".startup-incomplete"):
+            try:
+                (self.profile_dir / name).unlink(missing_ok=True)
+            except Exception as e:
+                logger.debug(f"Profile lock cleanup skipped ({name}): {e}")
 
         logger.info("Browser closed")
 
