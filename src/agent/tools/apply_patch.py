@@ -27,6 +27,7 @@ See: docs/工具重新设计共识.md, ../apply_patch instructions
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,20 @@ Hunk = AddFileHunk | DeleteFileHunk | UpdateFileHunk
 
 def parse_patch(text: str) -> list[Hunk]:
     """Parse patch text into hunks. Raises PatchParseError on malformed input."""
+    # Lenient cleanup for deepseek thinking-mode quirks:
+    #   - trailing residue after `*** End Patch` (e.g. `</｜DSML｜parameter>`,
+    #     `</parameter>`, or a concatenated second `*** Begin Patch`)
+    #     → truncate at the first `*** End Patch`.
+    #   - `*** Begin Patch` present but `*** End Patch` entirely missing
+    #     (model forgot the closing marker)
+    #     → strip trailing XML-ish residue and append the missing marker.
+    end_pos = text.find(_END)
+    if end_pos != -1:
+        text = text[: end_pos + len(_END)]
+    elif _BEGIN in text:
+        text = re.sub(r"\s*</[^>]+>\s*$", "", text, flags=re.IGNORECASE)
+        text = text.rstrip() + "\n" + _END
+
     lines = text.strip().split("\n")
     if len(lines) < 2:
         raise PatchParseError("Patch text too short")

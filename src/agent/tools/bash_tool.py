@@ -68,7 +68,14 @@ _AUTO_SAVE_THRESHOLD = 30000
 
 async def handle(ctx: Any, **kwargs: Any) -> str:
     command: str = kwargs.get("command", "")
-    timeout_ms: int = kwargs.get("timeout", _DEFAULT_TIMEOUT_MS)
+
+    # Defensive: LLM occasionally passes timeout as a string ("60000") or junk
+    # despite the schema declaring integer. Coerce here so `min(...)` below
+    # doesn't blow up with `'<' not supported between instances of int and str`.
+    try:
+        timeout_ms = int(kwargs.get("timeout") or _DEFAULT_TIMEOUT_MS)
+    except (TypeError, ValueError):
+        timeout_ms = _DEFAULT_TIMEOUT_MS
 
     if not command.strip():
         return "Error: empty command"

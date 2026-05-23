@@ -84,11 +84,11 @@ class ToolRegistry:
         """Generate OpenAI-format tool schemas for all registered tools."""
         return [tool.to_openai_schema() for tool in self._tools.values()]
 
-    async def execute(self, name: str, ctx: Any, **kwargs: Any) -> Any:
+    async def execute(self, tool_name: str, ctx: Any, **kwargs: Any) -> Any:
         """Dispatch a tool call by name.
 
         Args:
-            name: Tool name from LLM tool_call.
+            tool_name: Tool name from LLM tool_call.
             ctx: ToolContext (browser context) or other context object.
             **kwargs: Tool arguments from LLM.
 
@@ -98,17 +98,22 @@ class ToolRegistry:
         Raises:
             KeyError: Unknown tool name.
         """
-        tool = self._tools.get(name)
+        # Defensive: deepseek-v4-pro sometimes adds a spurious `name` key inside
+        # tool arguments, which would collide with the positional `tool_name`
+        # via **kwargs and raise "got multiple values for argument 'name'".
+        kwargs.pop("name", None)
+
+        tool = self._tools.get(tool_name)
         if tool is None:
-            raise KeyError(f"Unknown tool: '{name}'. Available: {', '.join(self._tools.keys())}")
+            raise KeyError(f"Unknown tool: '{tool_name}'. Available: {', '.join(self._tools.keys())}")
 
         try:
             result = await tool.handler(ctx, **kwargs)
             return result
         except TypeError as e:
             # Bad arguments from LLM — return error instead of crashing
-            logger.warning(f"Tool '{name}' argument error: {e}", extra={"tool": name})
-            return f"Error: invalid arguments for {name}: {e}"
+            logger.warning(f"Tool '{tool_name}' argument error: {e}", extra={"tool": tool_name})
+            return f"Error: invalid arguments for {tool_name}: {e}"
         except Exception as e:
-            logger.error(f"Tool '{name}' execution error: {e}", extra={"tool": name, "error": str(e)})
+            logger.error(f"Tool '{tool_name}' execution error: {e}", extra={"tool": tool_name, "error": str(e)})
             raise
