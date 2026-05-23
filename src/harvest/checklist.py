@@ -204,6 +204,10 @@ Rules for check commands:
 - Use bash builtins / utils: `test`, `[[ ]]`, `wc`, `ls`, `find`, `grep`, `head`, `cat`.
 - Each check must finish in < 60s and be idempotent.
 - Quote variables; expect filenames with spaces or commas (run_dir often has them).
+- DO NOT assume per-sample subdirectory nesting. Count files with globs
+  matching the actual samples layout described below — e.g.
+  `find data -maxdepth 1 -name '*.html' | wc -l` (flat) — not
+  `find ... -exec dirname {} \\; | sort -u | wc -l` (assumes nesting).
 
 Coverage (write 3-7 criteria total):
 1. Output count — does data quantity meet the boundary stated in the requirement?
@@ -234,14 +238,27 @@ async def compile_checklist(
     """
     sample_listing = "(no samples available)"
     sample_preview = ""
+    samples_layout_desc = "unknown (samples dir missing)"
     if samples_dir.is_dir():
-        files = sorted(p for p in samples_dir.iterdir() if p.is_file())[:8]
+        all_entries = list(samples_dir.iterdir())
+        files = sorted(p for p in all_entries if p.is_file())
+        subdirs = [p for p in all_entries if p.is_dir()]
         if files:
             sample_listing = "\n".join(
-                f"- {p.name} ({p.stat().st_size} bytes)" for p in files
+                f"- {p.name} ({p.stat().st_size} bytes)" for p in files[:8]
+            )
+            if len(files) > 8:
+                sample_listing += f"\n- ... ({len(files) - 8} more files)"
+        if not subdirs:
+            samples_layout_desc = (
+                f"FLAT — {len(files)} files directly under samples/, no subdirectories"
+            )
+        else:
+            samples_layout_desc = (
+                f"NESTED — {len(subdirs)} subdirectories, {len(files)} top-level files"
             )
         # Try to include one small sample's full content as shape reference
-        for p in files:
+        for p in files[:8]:
             if p.suffix.lower() == ".json" and p.stat().st_size < 4000:
                 try:
                     sample_preview = (
@@ -254,8 +271,13 @@ async def compile_checklist(
 
     user_msg = (
         f"Requirement (boundary, verbatim):\n{requirement}\n\n"
-        f"Samples directory (read-only shape reference, at ../samples/ from workspace):\n"
-        f"{sample_listing}"
+        f"Samples directory layout (read-only reference, at ../samples/ from workspace):\n"
+        f"  shape: {samples_layout_desc}\n"
+        f"  contents:\n{sample_listing}\n\n"
+        f"The harvest agent writes output to `data/` under the workspace. Most agents "
+        f"mirror the samples layout — if samples are FLAT, expect output like "
+        f"`data/<id>_<name>.html`, not `data/<id>/foo.html`. Write checks that work "
+        f"with the actual layout (use file globs, not unique-dirname counting)."
         f"{sample_preview}\n\n"
         f"Compile the acceptance checklist now."
     )
