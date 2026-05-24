@@ -38,6 +38,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["key"],
+    "additionalProperties": False,
 }
 
 

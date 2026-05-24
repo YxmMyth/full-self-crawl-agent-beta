@@ -23,6 +23,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["thought"],
+    "additionalProperties": False,
 }
 
 

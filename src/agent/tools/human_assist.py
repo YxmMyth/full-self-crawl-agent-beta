@@ -61,11 +61,13 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["reason"],
+    "additionalProperties": False,
 }
 
 
 async def handle(ctx: Any, **kwargs: Any) -> dict:
-    reason = kwargs.get("reason", "").strip()
+    raw_reason = kwargs.get("reason", "")
+    reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
     if not reason:
         return {
             "status": "error",

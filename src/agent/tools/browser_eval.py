@@ -64,6 +64,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["script"],
+    "additionalProperties": False,
 }
 
 _KIND_DIRS = {"sample": "samples", "catalog": "catalog", "workspace": "workspace"}
@@ -83,11 +84,24 @@ _ERROR_HINTS = [
 
 
 async def handle(ctx: ToolContext, **kwargs: Any) -> str:
-    script: str = kwargs.get("script", "")
-    save_as: str | None = kwargs.get("save_as")
-    kind: str | None = kwargs.get("kind")
-    if kind is not None:
-        kind = kind.strip().lower() or None
+    # Defensive coercion: deepseek-v4-pro sometimes serializes bool/int/None
+    # where a string is expected. Coerce or fail with a clear message instead
+    # of an AttributeError that fires inside .strip().
+    raw_script = kwargs.get("script", "")
+    if not isinstance(raw_script, str):
+        return (
+            f"Error: 'script' must be a string, got {type(raw_script).__name__}: "
+            f"{raw_script!r}"
+        )
+    script: str = raw_script
+
+    raw_save_as = kwargs.get("save_as")
+    save_as: str | None = raw_save_as if isinstance(raw_save_as, str) else None
+
+    raw_kind = kwargs.get("kind")
+    kind: str | None = None
+    if isinstance(raw_kind, str):
+        kind = raw_kind.strip().lower() or None
 
     if not script.strip():
         return "Error: empty script"

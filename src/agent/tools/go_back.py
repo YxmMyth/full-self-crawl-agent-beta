@@ -25,6 +25,7 @@ TOOL_PARAMETERS = {
     "type": "object",
     "properties": {},
     "required": [],
+    "additionalProperties": False,
 }
 
 

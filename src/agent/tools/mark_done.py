@@ -51,11 +51,18 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["reason"],
+    "additionalProperties": False,
 }
 
 
 async def handle(ctx: Any, **kwargs: Any) -> str:
-    reason: str = kwargs.get("reason", "").strip()
+    raw_reason = kwargs.get("reason", "")
+    if not isinstance(raw_reason, str):
+        return (
+            f"Error: 'reason' must be a string, got {type(raw_reason).__name__}: "
+            f"{raw_reason!r}"
+        )
+    reason: str = raw_reason.strip()
     if not reason:
         return "Error: mark_done requires a non-empty `reason`."
 

@@ -35,6 +35,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["target"],
+    "additionalProperties": False,
 }
 
 

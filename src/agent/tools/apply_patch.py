@@ -74,6 +74,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["patch"],
+    "additionalProperties": False,
 }
 
 
