@@ -385,6 +385,81 @@ def _apply_update_chunks(
     return new_lines
 
 
+def apply_patch_to_text(
+    files: dict[str, str],
+    patch_text: str,
+    allowed_paths: set[str] | None = None,
+) -> dict[str, str]:
+    """In-memory variant of apply_patch — operates on a {path: text} dict.
+
+    Used by maintain_model agent: procedural.md / semantic.md aren't real
+    files on disk, they're DB-stored strings. We expose them to the agent
+    as virtual filenames so it can use the same Codex apply_patch DSL it
+    already knows from harvest.
+
+    Args:
+        files: current {virtual_path: text} contents.
+        patch_text: standard Codex apply_patch DSL.
+        allowed_paths: if set, restricts which paths the patch may touch.
+                       Returns/raises if patch references a path not in this set.
+
+    Returns:
+        New {path: text} dict reflecting all hunks applied.
+
+    Raises:
+        PatchParseError on malformed input, missing file, or disallowed path.
+    """
+    hunks = parse_patch(patch_text)
+    result = dict(files)
+
+    for hunk in hunks:
+        if isinstance(hunk, UpdateFileHunk):
+            path = hunk.path
+            if allowed_paths is not None and path not in allowed_paths:
+                raise PatchParseError(
+                    f"Path '{path}' not allowed. Permitted: {sorted(allowed_paths)}"
+                )
+            if path not in result:
+                raise PatchParseError(f"Update File: '{path}' does not exist")
+            current = result[path]
+            file_lines = current.split("\n")
+            new_lines = _apply_update_chunks(file_lines, hunk.chunks)
+            new_content = "\n".join(new_lines)
+
+            if hunk.move_to:
+                if allowed_paths is not None and hunk.move_to not in allowed_paths:
+                    raise PatchParseError(
+                        f"Move to '{hunk.move_to}' not allowed. "
+                        f"Permitted: {sorted(allowed_paths)}"
+                    )
+                del result[path]
+                result[hunk.move_to] = new_content
+            else:
+                result[path] = new_content
+
+        elif isinstance(hunk, AddFileHunk):
+            if allowed_paths is not None and hunk.path not in allowed_paths:
+                raise PatchParseError(
+                    f"Add File '{hunk.path}' not allowed. "
+                    f"Permitted: {sorted(allowed_paths)}"
+                )
+            if hunk.path in result:
+                raise PatchParseError(f"Add File: '{hunk.path}' already exists")
+            result[hunk.path] = hunk.content
+
+        elif isinstance(hunk, DeleteFileHunk):
+            if allowed_paths is not None and hunk.path not in allowed_paths:
+                raise PatchParseError(
+                    f"Delete File '{hunk.path}' not allowed. "
+                    f"Permitted: {sorted(allowed_paths)}"
+                )
+            if hunk.path not in result:
+                raise PatchParseError(f"Delete File: '{hunk.path}' does not exist")
+            del result[hunk.path]
+
+    return result
+
+
 def _apply_one_hunk(hunk: Hunk, workspace: Path) -> tuple[str, str]:
     """Apply one hunk. Returns (action, path_str) for summary, raises on error."""
     if isinstance(hunk, AddFileHunk):

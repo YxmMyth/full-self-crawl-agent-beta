@@ -383,8 +383,12 @@ class ReconPlanner:
 
         logger.info(f"Spawning execution session {session_id}")
 
-        # Snapshot artifact dirs BEFORE the session runs
+        # Snapshot artifact dirs + max obs id BEFORE the session runs.
+        # The obs-id snapshot lets maintain_model see exactly which obs ids
+        # this session produced (id > snapshot) — required for incremental
+        # patch mode instead of full rewrite of the procedural/semantic model.
         before = self._snapshot_artifacts()
+        since_obs_id = await db.max_observation_id_for_domain(self.domain)
 
         # Create and run session
         session = AgentSession(
@@ -401,8 +405,18 @@ class ReconPlanner:
 
         session_result = await session.run()
 
-        # maintain_model: update Semantic + Procedural models
-        model_result = await maintain_and_summarize(self.llm, self.domain, session_id)
+        # maintain_model: incremental update of Semantic + Procedural via tool-use agent.
+        # Compaction round every 5 sessions to consolidate Working Notes → Verified
+        # and drop stale entries (otherwise model file grows unbounded under
+        # incremental-only mode).
+        is_compaction = self.session_count > 0 and self.session_count % 5 == 0
+        model_result = await maintain_and_summarize(
+            self.llm,
+            self.domain,
+            session_id,
+            since_obs_id=since_obs_id,
+            compaction_mode=is_compaction,
+        )
 
         # Snapshot AFTER and diff
         after = self._snapshot_artifacts()
