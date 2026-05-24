@@ -7,10 +7,6 @@ the specific failed criteria as the tool result and the agent continues.
 The checklist (workspace/checklist.md) is compiled from requirement.txt
 by the harvest launcher at mission start. mark_done parses + runs it.
 
-Feature-gated by Config.VERIFICATION_SUBAGENT_ENABLED — when disabled,
-mark_done auto-passes (useful for testing without spending LLM calls
-on the launcher's checklist compile step).
-
 Requires the following attribute on ctx (attached by harvest launcher):
   - ctx._domain      : the domain string
 
@@ -72,12 +68,6 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
 
     workspace = Config.run_dir(domain) / "workspace"
     checklist_path = workspace / "checklist.md"
-
-    # Feature gate — bypass entirely when verification is disabled
-    if not Config.VERIFICATION_SUBAGENT_ENABLED:
-        ctx._mission_done = True
-        logger.info("mark_done: verification disabled, auto-PASS")
-        return f"VERIFICATION SKIPPED (feature disabled). Mission marked complete.\nReason: {reason}"
 
     # Lazy import to avoid coupling the tool module to harvest internals
     from src.harvest.checklist import run_all_checks, format_results

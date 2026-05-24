@@ -24,7 +24,7 @@ from src.llm.maintain_model import maintain_and_summarize
 from src.recording.agent import RecordingAgent
 from src.research.agent import run_research
 from src.utils.logging import get_logger
-from src.verification.agent import run_verification
+from src.verification.audit import run_audit
 from src.world_model import db
 
 logger = get_logger(__name__)
@@ -67,8 +67,34 @@ workspace/.
    - samples/ already has the deliverables for the requirement → mark_done. \
 Do NOT spawn another execution to re-confirm what's already on disk.
 
-mark_done may be rejected with specific gaps. Address those gaps \
-and continue.
+## Completion Audit (mark_done discipline)
+
+Calling mark_done is a CLAIM that the World Model + samples/catalog/scripts \
+contain everything the harvest stage needs to take over without re-discovering \
+basics. Treat that claim as unproven until you have verified it against the \
+actual current state. Before calling mark_done(status='complete'):
+
+- For each L1-L4 stage, identify the EVIDENCE in the Model that proves you \
+reached it (a quote, a location count, a specific file under samples/).
+- Treat indirect or uncertain evidence as not done — gather stronger \
+evidence or spawn another session instead of marking complete.
+- Do NOT mark complete merely because budget feels nearly exhausted, because \
+you're stopping work, or because the planner narrative reads plausibly. \
+mark_done is verified, not narrated.
+- Do NOT redefine success around what already exists. If the requirement \
+names data you haven't located, you are not done — keep working.
+
+mark_done(status='complete') triggers a two-phase audit:
+  Phase 1 — mechanical sanity (semantic.md > 200 chars, procedural.md > 200 \
+chars, locations >= 3, samples/+catalog/ >= 1 file). Fast fail on empty WM.
+  Phase 2 — LLM evidence-by-evidence check of L1/L2/L3/L4/Scalability.
+
+If the audit blocks you, the specific gaps come back — address them and \
+call mark_done again. If you are truly at an impasse and cannot make \
+meaningful progress without operator input or an external state change \
+(same blocker recurred 3+ goal rounds), call \
+mark_done(status='blocked', reason='...') instead. Never use 'blocked' \
+because the work is hard, slow, or uncertain.
 
 ## Writing Briefings
 
@@ -218,15 +244,41 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "mark_done",
             "description": (
-                "Mark reconnaissance as complete. May be rejected if verification "
-                "finds gaps — in that case, address the gaps and continue."
+                "Terminate reconnaissance. Two valid statuses:\n"
+                "  - 'complete': you believe the World Model + samples/catalog "
+                "satisfy the requirement. Triggers a two-phase audit "
+                "(mechanical sanity + LLM evidence-by-evidence check of L1-L4 "
+                "stages + scalability). PASS → recon ends. BLOCKED → "
+                "specific gaps returned, you continue.\n"
+                "  - 'blocked': you are at a true impasse and cannot make "
+                "meaningful progress without operator input or an external "
+                "state change. Use sparingly — only when the same blocker has "
+                "recurred for 3+ goal rounds. NEVER use 'blocked' merely "
+                "because the work is slow, uncertain, or incomplete."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reason": {"type": "string", "description": "Why you believe reconnaissance is complete."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["complete", "blocked"],
+                        "description": (
+                            "'complete' = objective achieved (will be audited). "
+                            "'blocked' = at impasse, need external help."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "For 'complete': what concretely got done — quote "
+                            "evidence (samples/X has Y files, semantic.md says Z, "
+                            "scripts/foo.py replicates the extraction). "
+                            "For 'blocked': what specifically you cannot move "
+                            "past and why."
+                        ),
+                    },
                 },
-                "required": ["reason"],
+                "required": ["status", "reason"],
             },
         },
     },
@@ -339,9 +391,15 @@ class ReconPlanner:
                     "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                 })
 
-                # Check for DONE
-                if tc.name == "mark_done" and isinstance(result, str) and '"status": "DONE"' in result:
-                    return "done"
+                # Check for DONE — parse the JSON result rather than substring
+                # so 'audit_blocked' can't accidentally match 'DONE'.
+                if tc.name == "mark_done" and isinstance(result, str):
+                    try:
+                        parsed = json.loads(result)
+                        if parsed.get("status") == "DONE":
+                            return f"done:{parsed.get('outcome', 'complete')}"
+                    except json.JSONDecodeError:
+                        pass
 
             # Context size check
             total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
@@ -363,7 +421,10 @@ class ReconPlanner:
             elif name == "think":
                 return json.dumps({"thought": args.get("thought", "")})
             elif name == "mark_done":
-                return await self._mark_done(args.get("reason", ""))
+                return await self._mark_done(
+                    args.get("status", "complete"),
+                    args.get("reason", ""),
+                )
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -585,24 +646,39 @@ class ReconPlanner:
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    async def _mark_done(self, reason: str) -> str:
-        if Config.VERIFICATION_SUBAGENT_ENABLED:
-            verdict, gaps = await run_verification(
-                self.llm, self.domain, self.requirement, reason,
-            )
-            if verdict == "PASS":
-                await self._emit_strategy_report()
-                return json.dumps({"status": "DONE"})
-            else:
-                return json.dumps({
-                    "status": "blocked",
-                    "verdict": verdict,
-                    "gaps": gaps[:2000],
-                    "message": "Verification found gaps. Address them and try again.",
-                })
-        else:
+    async def _mark_done(self, status: str, reason: str) -> str:
+        status = (status or "complete").strip().lower()
+
+        # 'blocked' is the explicit "I'm at an impasse" escape hatch — borrow
+        # from codex /goal. Recon ends without claiming success.
+        if status == "blocked":
+            logger.warning(f"Planner declared BLOCKED: {reason[:200]}")
             await self._emit_strategy_report()
-            return json.dumps({"status": "DONE"})
+            return json.dumps({
+                "status": "DONE",
+                "outcome": "blocked",
+                "reason": reason,
+            })
+
+        # 'complete' (default) — run the two-phase audit.
+        result = await run_audit(
+            self.llm, self.domain, self.requirement, reason,
+        )
+        if result.overall == "PASS":
+            await self._emit_strategy_report()
+            return json.dumps({"status": "DONE", "outcome": "complete"})
+
+        # BLOCKED — feed back specific gaps to the planner.
+        return json.dumps({
+            "status": "audit_blocked",
+            "phase": result.phase,
+            "feedback": result.feedback()[:3000],
+            "message": (
+                "Audit blocked mark_done. Address the gaps above and call "
+                "mark_done again, or use mark_done(status='blocked', ...) "
+                "if you're truly at an impasse."
+            ),
+        })
 
     async def _emit_strategy_report(self) -> None:
         """Write a human-readable strategy report after recon PASS.

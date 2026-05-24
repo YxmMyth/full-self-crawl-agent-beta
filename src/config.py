@@ -37,11 +37,6 @@ class Config:
     # ── Artifacts ────────────────────────────────────────
     ARTIFACTS_DIR: Path = Path(os.getenv("ARTIFACTS_DIR", "./artifacts"))
 
-    # ── Feature gates ────────────────────────────────────
-    VERIFICATION_SUBAGENT_ENABLED: bool = (
-        os.getenv("VERIFICATION_SUBAGENT_ENABLED", "true").lower() == "true"
-    )
-
     # ── Safety net (Planner) ─────────────────────────────
     MAX_PLANNER_TOOL_CALLS: int = int(os.getenv("MAX_PLANNER_TOOL_CALLS", "200"))
     MAX_SESSIONS: int = int(os.getenv("MAX_SESSIONS", "15"))

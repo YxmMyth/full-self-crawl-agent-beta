@@ -103,7 +103,6 @@ Docker Compose 作为**可选部署方案**保留，用于：生产服务器部�
 | `DATABASE_URL` | 是 | PostgreSQL 连接串 |
 | `BROWSER_WS_URL` | 否 | 远程 Camoufox WS URL（本地直接启动时不需要） |
 | `ARTIFACTS_DIR` | 否 | 样本输出目录，默认 `./artifacts` |
-| `VERIFICATION_SUBAGENT_ENABLED` | 否 | Verification Subagent 开关，默认 `true`。设为 `false` 禁用后 mark_done 直接返回 DONE |
 
 预留（MVP 不实现）：`AUTH_GITHUB_STATE`、`AUTH_GOOGLE_STATE` — 未来认证能力。
 
@@ -167,9 +166,8 @@ src/
 │   └── agent.py               # 录制 Agent：持久对话 + tool-use 循环，维护 Observations（CRUD）
 ├── research/
 │   └── agent.py               # Research Subagent：调研互联网，产出报告文件（web_search/web_fetch/bash/think）
-├── verification/              # [feature-gated] Verification Subagent：DONE 守门人，反 satisficing
-│   ├── agent.py               # tool-use 循环（read_world_model/bash/think）
-│   └── prompt.py              # 反 satisficing system prompt（借鉴 Claude Code Verification Agent）
+├── verification/              # Audit module：recon mark_done 内部触发
+│   └── audit.py               # 两 phase（mechanical bash sanity + LLM single-call checklist），no tool-use loop
 └── utils/
     ├── url.py                 # URL 规范化
     └── logging.py             # 结构化日志
@@ -300,20 +298,17 @@ agent 可通过 `browser_reset(browser_type?, proxy?, headed?)` 动态切换浏�
 - 输出：调研报告写入 `artifacts/{domain}/research/{topic}.md`，key_findings 返回给 Planner（Push）
 - 触发时机：**Planner LLM 完全自主决定**（初始调研、中途遇到未知 tech、验证失败后查文档等）
 
-**Verification Subagent（tool-use 循环，mark_done 内部程序触发，feature-gated）：**
-- **触发方式**：`mark_done` 工具的 Python 实现内部自动触发。Planner 不直接 spawn，不知道它存在
-- **可拆卸**：`VERIFICATION_SUBAGENT_ENABLED=false` 禁用后 mark_done 直接返回 DONE
-- 工具：`read_world_model(location?)`, `bash(command)`, `think(thought)` — **只读 + 执行**
-- PASS → mark_done 返回 `{status: "DONE"}`
-- FAIL/PARTIAL → mark_done 返回 `{status: "blocked", gaps: ...}`，Planner 继续循环
-- System prompt 四个要素（借鉴 Claude Code Verification Agent）：
-  1. 命名 rationalization（列出偷懒借口 + 反向动作）
-  2. "读 WM 不是验证"（禁止纯语言层面检查）
-  3. 强制 adversarial probe（主动找漏洞）
-  4. 严格输出格式 + 三选一裁决（PASS/FAIL/PARTIAL）
+**Audit（mark_done 内部触发，hybrid two-phase，借鉴 codex /goal + lidangzzz goal-driven）：**
+- **触发方式**：`mark_done(status='complete')` 工具的 Python 实现内部自动触发。Planner 不直接 spawn
+- **Phase 1 — Mechanical sanity**（bash 风格,deterministic）：semantic.md > 200 字 / procedural.md > 200 字 / locations >= 3 / samples+catalog >= 1 文件。任意 fail → 直接 BLOCKED，省 LLM tokens
+- **Phase 2 — LLM single-call audit**（no tool-use loop，避开 deepseek deadlock）：一次 `llm.generate()`，prompt 列 5 个 criteria（L1 Site Structure / L2 Data Distribution / L3 Requirement Mapping / L4 Sample Collection / Scalability），LLM 输出 JSON `{criteria:[...], overall, blocking_summary}`，每条 criterion 必须给 evidence
+- **mark_done 的 status enum**（借 codex `/goal` update_goal）:
+  - `complete`：触发 audit，PASS → DONE / BLOCKED → 返回 gaps 给 planner 继续
+  - `blocked`：planner 自己宣告 impasse 逃生，直接 DONE outcome='blocked'（不跑 audit）
+- Audit prompt 借 codex continuation.md 的 "treat completion as unproven, prove not merely fail-to-find"
 
 **停止条件：**
-1. Planner 调 mark_done → Verification PASS（或 feature 禁用时直接 DONE）
+1. Planner 调 mark_done → Audit PASS（或 status='blocked' 时直接 DONE outcome='blocked'）
 2. 安全网：总 tool call 数上限 / spawn_execution 次数上限
 3. Planner context window 满
 
