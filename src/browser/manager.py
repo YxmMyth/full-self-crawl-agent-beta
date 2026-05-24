@@ -21,9 +21,10 @@ See: 架构共识文档.md §六 浏览器环境与策略
 from __future__ import annotations
 
 import asyncio
-import platform
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from src.browser.context import ToolContext
 from src.browser.firefox_prefs import (
@@ -36,6 +37,41 @@ from src.config import Config
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Camoufox process name varies slightly across versions / OS. Keep both
+# lowercased for case-insensitive match (`process_iter` returns the actual
+# OS name, which on Windows is 'camoufox.exe').
+_CAMOUFOX_PROC_NAMES = {"camoufox.exe", "camoufox"}
+
+
+def _snapshot_camoufox_pids() -> set[int]:
+    """Return the set of currently-alive camoufox process PIDs."""
+    pids: set[int] = set()
+    for p in psutil.process_iter(["name"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+            if name in _CAMOUFOX_PROC_NAMES:
+                pids.add(p.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return pids
+
+
+def _expand_with_children(pids: set[int]) -> set[int]:
+    """Add descendants of each PID. Camoufox spawns a Firefox process tree
+    (parent + content/GPU children); killing only the parent leaves children
+    holding the profile lock, which is the exact zombie pattern that caused
+    the 2026-05-24 svg-run cascade.
+    """
+    expanded: set[int] = set(pids)
+    for pid in list(pids):
+        try:
+            proc = psutil.Process(pid)
+            for child in proc.children(recursive=True):
+                expanded.add(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return expanded
 
 # Sized for Windows 11 @ 150% scaling (WorkingArea ≈ 1707×1019).
 # Viewport accounts for ~84px of Firefox chrome (tab bar + address bar).
@@ -63,6 +99,12 @@ class BrowserManager:
         # Gateway is set by main.py once; auto-attached to ctx on every launch
         # so browser_reset doesn't lose the assist channel.
         self.gateway: Any = None
+        # PIDs spawned by THIS manager's most recent launch. Computed as the
+        # diff of process-name snapshots taken before vs after AsyncCamoufox
+        # __aenter__. Used at close() to kill exactly the processes we own —
+        # not all camoufox.exe on the machine. Borrowed from Codex's owned
+        # `tokio::process::Child` pattern (utils/pty/src/process_group.rs).
+        self._spawned_pids: set[int] = set()
 
     @property
     def profile_dir(self) -> Path:
@@ -210,29 +252,22 @@ class BrowserManager:
                 pass
             self._playwright = None
 
-        # Defensive: AsyncCamoufox.__aexit__ doesn't reliably terminate the
-        # underlying Firefox process on Windows. Without this, repeated
-        # browser_reset() calls during a long mission accumulate zombie
-        # camoufox.exe that hold the profile lock — fresh launches then
-        # silently fail with "Target page, context or browser has been
-        # closed" within seconds. (Observed 2026-05-23 harvest 100-scope run:
-        # 8 zombies accumulated over 18 minutes, forced human_assist popups.)
-        # MVP assumes one mission at a time, so process-name kill is safe.
-        # Switch to PID-tracking when concurrent missions land.
-        try:
-            cmd = (
-                ["taskkill", "/F", "/IM", "camoufox.exe"]
-                if platform.system() == "Windows"
-                else ["pkill", "-f", "camoufox"]
+        # PID-tracked cleanup — kill exactly the camoufox processes WE
+        # spawned, verify each one is actually gone. Replaces the previous
+        # `taskkill /F /IM camoufox.exe` (process-name based) which:
+        #   - silently failed on Windows (stderr was DEVNULLed, return code ignored)
+        #   - would race a concurrent mission if there ever were one
+        #   - accumulated zombies that held the profile lock and broke the
+        #     next launch within seconds (2026-05-24 svg-run cascade)
+        # Inspired by Codex's owned-Child pattern (utils/pty/src/process_group.rs).
+        residual = await self._kill_spawned_processes()
+        if residual:
+            # Genuinely couldn't kill them — log loud so operator can intervene
+            # rather than letting the next launch race a stale process.
+            logger.warning(
+                f"Failed to kill {len(residual)} camoufox PID(s): {sorted(residual)}. "
+                f"Next launch may collide on profile lock."
             )
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except Exception as e:
-            logger.debug(f"Residual Camoufox cleanup skipped: {e}")
 
         for name in ("parent.lock", ".startup-incomplete"):
             try:
@@ -240,7 +275,47 @@ class BrowserManager:
             except Exception as e:
                 logger.debug(f"Profile lock cleanup skipped ({name}): {e}")
 
-        logger.info("Browser closed")
+        logger.info(
+            f"Browser closed (killed {len(self._spawned_pids) - len(residual)}/"
+            f"{len(self._spawned_pids)} tracked PIDs)"
+        )
+        self._spawned_pids = set()
+
+    async def _kill_spawned_processes(self) -> set[int]:
+        """Kill tracked PIDs, verify each is gone. Returns set of PIDs that
+        could not be killed (empty = clean kill).
+        """
+        if not self._spawned_pids:
+            return set()
+
+        # Step 1: SIGKILL each one we can still see. psutil.kill() = SIGKILL
+        # on POSIX, TerminateProcess on Windows — both unconditional, no
+        # cleanup handler runs.
+        procs: list[psutil.Process] = []
+        for pid in self._spawned_pids:
+            try:
+                p = psutil.Process(pid)
+                p.kill()
+                procs.append(p)
+            except psutil.NoSuchProcess:
+                continue  # already dead, fine
+            except psutil.AccessDenied as e:
+                logger.warning(f"AccessDenied killing camoufox PID {pid}: {e}")
+
+        # Step 2: wait for each to actually exit (up to ~3s total).
+        # psutil.wait_procs handles already-dead processes gracefully.
+        if procs:
+            gone, alive = psutil.wait_procs(procs, timeout=3)
+            if alive:
+                # Last resort — try kill once more, then surface remaining
+                for p in alive:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                _, still_alive = psutil.wait_procs(alive, timeout=2)
+                return {p.pid for p in still_alive}
+        return set()
 
     def setup_page_listeners(self, page: Any) -> None:
         """Setup network capture and dialog handling on a new page/tab."""
@@ -283,10 +358,26 @@ class BrowserManager:
         if self._proxy:
             kwargs["proxy"] = {"server": self._proxy}
 
+        # PID tracking — snapshot before/after so we can later kill exactly
+        # the camoufox.exe processes WE spawned (and their descendants),
+        # not all camoufox.exe on the machine (which would race a concurrent
+        # mission and was previously a silent-fail mode anyway).
+        before_pids = _snapshot_camoufox_pids()
+
         self._camoufox_ctx = AsyncCamoufox(**kwargs)
         pw_context = await self._camoufox_ctx.__aenter__()
         self._pw_context = pw_context
         page = pw_context.pages[0] if pw_context.pages else await pw_context.new_page()
+
+        # Capture only the NEW PIDs (delta). Include descendants since
+        # Camoufox spawns content/GPU child processes after the main one.
+        after_pids = _snapshot_camoufox_pids()
+        spawned = after_pids - before_pids
+        self._spawned_pids = _expand_with_children(spawned)
+        logger.debug(
+            f"Spawned camoufox PIDs (incl. children): {sorted(self._spawned_pids)} "
+            f"(direct={sorted(spawned)})"
+        )
 
         return page, pw_context
 
