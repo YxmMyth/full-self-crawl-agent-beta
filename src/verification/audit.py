@@ -61,7 +61,7 @@ intent or plausible-looking summaries.
   not abstract gestures.
 - The planner WANTS to stop. Your default bias is skepticism.
 
-## The 5 Criteria
+## The 6 Criteria
 
 C1 — L1 Site Structure
   Semantic model describes URL patterns and how pages connect (parent/child,
@@ -80,12 +80,37 @@ C3 — L3 Requirement Mapping
   lives, this criterion fails regardless of how much general exploration
   was done.
 
-C4 — L4 Sample Collection
-  samples/ contains at least one real primary-data file demonstrating the
-  extraction works end-to-end. catalog/ entries (lists, IDs, URL maps) do
-  NOT count as samples — those prove WHERE data lives, not THAT extraction
-  works. If samples/ is empty or holds only HTML disguises / login pages,
-  this criterion fails.
+C4 — Sample Method Validation (qualitative coverage, not quantity)
+  samples/ contains real primary-data files demonstrating the access
+  methods documented in procedural model actually work end-to-end.
+
+  WHAT COUNTS AS A SAMPLE. A sample is ONE concrete instance of the
+  primary data, on disk, in its native consumable form:
+    - News / blog → article full text (not headline list)
+    - UI Kit / asset marketplace → the design file (.fig / .sketch / .zip)
+    - Image / stock library → the image bytes (not gallery JSON)
+    - Code sandbox / snippet sharing → runnable source files
+    - Forum / Q&A → posts + replies (full content)
+    - Documentation → full doc text
+
+  catalog/ entries (lists, IDs, URL maps, listing JSONs) do **NOT** count
+  as samples — those prove WHERE data lives, not THAT extraction works.
+  100 catalog files in a fresh samples/ folder = still 0 samples. Don't
+  let a healthy catalog/ paper over an empty samples/.
+
+  Use bash to verify ACTUAL content of samples/ entries:
+    - `ls -la samples/` for sizes (< 1KB is almost certainly a placeholder)
+    - `file samples/*` for real format (an HTML disguise = wrong)
+    - For archives: `unzip -l` or `tar tzf` to confirm structure
+
+  COVERAGE BEAT QUANTITY. The count is not the point — the COVERAGE is.
+  If procedural documents three access methods (search API / detail page
+  scrape / API endpoint), samples/ should have at least one file
+  demonstrating each that's load-bearing for harvest. samples/ is sketch
+  grade — a few files is enough. Full-scale collection is harvest's job.
+
+  FAIL: samples/ is empty, holds only HTML disguises / login pages, or
+  holds only catalog-style listings mis-classified as samples.
 
 C5 — Scalability
   Procedural model describes a REUSABLE method that can run at scale —
@@ -93,6 +118,27 @@ C5 — Scalability
   pagination, a fetch script template, a browser_eval snippet that
   generalizes, or a script under scripts/. "Open every page in a browser"
   is NOT scalable.
+
+C6 — Universe Definition (the harvest hand-off)
+  catalog/ contains the enumerable universe (the list of every entity
+  matching the requirement scope), OR the procedural model explicitly
+  marks the universe as "unbounded — gate required" and documents the
+  enumeration method (cursor / page range / sitemap / API endpoint).
+
+  PASS evidence forms:
+    (a) catalog/ has a file with all candidate IDs/URLs (cursor walked
+        to completion); procedural says "universe size: N at catalog/X".
+    (b) procedural explicitly says "universe unbounded" with the reason
+        (no total / no exhaustion API / >>10K) AND documents the
+        enumeration method harvest would use. The gate handles the
+        scoping decision in this case.
+
+  FAIL: catalog/ is empty or only has partial/incidental listings AND
+  procedural doesn't address universe at all. Harvest would have no
+  ground truth to verify completion against.
+
+  PARTIAL: catalog/ has data but partial (not walked to end) and
+  procedural doesn't acknowledge it's partial.
 
 ## Output Format (strict)
 
@@ -105,20 +151,32 @@ Return ONLY a single JSON object, no prose around it:
     {"id": "C2", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
     {"id": "C3", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
     {"id": "C4", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "C5", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."}
+    {"id": "C5", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
+    {"id": "C6", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."}
   ],
+  "universe": {
+    "bounded": true|false,
+    "size_estimate": "N or 'unbounded' or 'unknown'",
+    "catalog_pointer": "catalog/<file> or '(none)'"
+  },
   "overall": "PASS|BLOCKED",
   "blocking_summary": "If BLOCKED: 1-3 sentences of the biggest gaps the planner must address. Empty string if PASS."
 }
 ```
+
+The `universe` object is extracted from C6 evidence — the strategy report
+shows it to the human gate so they can decide whether to narrow scope.
 
 Rules:
 - `evidence` quotes or cites the actual artifact you read (e.g., "semantic.md
   paragraph 2 lists /pen/{id} pattern" or "samples/ has 0 files per ls -la").
 - `reason` explains why this verdict given the evidence. Concrete, not
   generic.
-- `overall` = PASS only if ALL 5 criteria are PASS. Any FAIL or PARTIAL
-  means BLOCKED.
+- `overall` = PASS only if ALL 6 criteria are PASS. Any FAIL or PARTIAL
+  means BLOCKED. Universe being "unbounded but documented" still PASSes
+  C6 — the gate handles the scope decision later.
+- `universe` is informational metadata derived from C6 — never blocks
+  audit on its own, but feeds the strategy report.
 - `blocking_summary` is what the planner reads first — make it actionable.
 """
 
@@ -135,12 +193,20 @@ class CriterionResult:
 
 
 @dataclass
+class UniverseInfo:
+    bounded: bool = False
+    size_estimate: str = "unknown"
+    catalog_pointer: str = "(none)"
+
+
+@dataclass
 class AuditResult:
     overall: str  # PASS | BLOCKED
     phase: str  # "mechanical" | "llm" | "both"
     blocking_summary: str = ""
     mechanical_failures: list[str] = field(default_factory=list)
     criteria: list[CriterionResult] = field(default_factory=list)
+    universe: UniverseInfo = field(default_factory=UniverseInfo)
     raw_llm_response: str = ""
 
     def feedback(self) -> str:
@@ -237,11 +303,14 @@ def _gather_artifact_listing(domain: str) -> str:
     return "\n".join(lines)
 
 
-def _parse_llm_audit(raw: str) -> tuple[list[CriterionResult], str, str] | None:
+def _parse_llm_audit(
+    raw: str,
+) -> tuple[list[CriterionResult], str, str, UniverseInfo] | None:
     """Parse the LLM's JSON output. Defensive against deepseek quirks
     (markdown code fences, trailing junk, extra whitespace).
 
-    Returns (criteria_list, overall, blocking_summary) or None if unparseable.
+    Returns (criteria_list, overall, blocking_summary, universe_info) or
+    None if unparseable.
     """
     if not raw:
         return None
@@ -318,7 +387,18 @@ def _parse_llm_audit(raw: str) -> tuple[list[CriterionResult], str, str] | None:
         overall = "BLOCKED"
 
     blocking_summary = str(data.get("blocking_summary", "")).strip()
-    return criteria, overall, blocking_summary
+
+    raw_universe = data.get("universe") or {}
+    if not isinstance(raw_universe, dict):
+        raw_universe = {}
+    universe = UniverseInfo(
+        bounded=bool(raw_universe.get("bounded", False)),
+        size_estimate=str(raw_universe.get("size_estimate", "unknown")).strip()
+            or "unknown",
+        catalog_pointer=str(raw_universe.get("catalog_pointer", "(none)")).strip()
+            or "(none)",
+    )
+    return criteria, overall, blocking_summary, universe
 
 
 async def _run_llm_audit(
@@ -326,9 +406,9 @@ async def _run_llm_audit(
     domain: str,
     requirement: str,
     mark_done_reason: str,
-) -> tuple[list[CriterionResult], str, str, str]:
+) -> tuple[list[CriterionResult], str, str, UniverseInfo, str]:
     """Run the LLM checklist audit. Returns
-    (criteria, overall, blocking_summary, raw_response).
+    (criteria, overall, blocking_summary, universe, raw_response).
     """
     semantic, procedural = await db.load_both_models(domain)
     artifact_listing = _gather_artifact_listing(domain)
@@ -354,10 +434,11 @@ async def _run_llm_audit(
             [],
             "BLOCKED",
             "Audit LLM returned unparseable output. Try again, or fix the verifier prompt.",
+            UniverseInfo(),
             raw,
         )
-    criteria, overall, blocking_summary = parsed
-    return criteria, overall, blocking_summary, raw
+    criteria, overall, blocking_summary, universe = parsed
+    return criteria, overall, blocking_summary, universe, raw
 
 
 # ── Public entrypoint ─────────────────────────────────────
@@ -403,7 +484,7 @@ async def run_audit(
         return result
 
     # Phase 2
-    criteria, overall, blocking_summary, raw = await _run_llm_audit(
+    criteria, overall, blocking_summary, universe, raw = await _run_llm_audit(
         llm, domain, requirement, mark_done_reason,
     )
     result = AuditResult(
@@ -412,6 +493,7 @@ async def run_audit(
         blocking_summary=blocking_summary,
         mechanical_failures=[],
         criteria=criteria,
+        universe=universe,
         raw_llm_response=raw,
     )
     _write_report(domain, round_num, result, mark_done_reason)

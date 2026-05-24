@@ -105,6 +105,25 @@ of previous sessions)
 - STARTING POINT: a specific URL or approach
 - COMPLETION CRITERIA: what counts as "done" for this session
 
+## Universe is part of recon's deliverable
+
+Recon's output to harvest is THREE things, not two:
+  1. World Model (semantic + procedural) — how the site works
+  2. samples/ — sketch primary data proving methods work
+  3. catalog/ — the **enumerable universe** of every entity matching \
+     the requirement scope (the list harvest must cover)
+
+Without (3), harvest cannot verify "all of it" — it doesn't know what \
+the universe is. Your briefings must explicitly direct an execution \
+session to enumerate the universe to catalog/ before you call mark_done. \
+This often takes a dedicated session: "Enumerate every pen ID under \
+the webgl tag listing — paginate to the end via cursor, save to \
+catalog/webgl_pens.jsonl."
+
+If the universe is unbounded (infinite feed, no total, no exhaustion \
+method), recon agent should document the boundedness in procedural \
+model. Strategy report will surface it to the human gate.
+
 ## Principles
 
 - DIRECT, DON'T MICROMANAGE. Set direction, not step-by-step instructions. \
@@ -653,7 +672,7 @@ class ReconPlanner:
         # from codex /goal. Recon ends without claiming success.
         if status == "blocked":
             logger.warning(f"Planner declared BLOCKED: {reason[:200]}")
-            await self._emit_strategy_report()
+            await self._emit_strategy_report(audit_result=None, blocked_reason=reason)
             return json.dumps({
                 "status": "DONE",
                 "outcome": "blocked",
@@ -665,7 +684,7 @@ class ReconPlanner:
             self.llm, self.domain, self.requirement, reason,
         )
         if result.overall == "PASS":
-            await self._emit_strategy_report()
+            await self._emit_strategy_report(audit_result=result, blocked_reason=None)
             return json.dumps({"status": "DONE", "outcome": "complete"})
 
         # BLOCKED — feed back specific gaps to the planner.
@@ -680,18 +699,26 @@ class ReconPlanner:
             ),
         })
 
-    async def _emit_strategy_report(self) -> None:
-        """Write a human-readable strategy report after recon PASS.
+    async def _emit_strategy_report(
+        self,
+        audit_result: Any = None,
+        blocked_reason: str | None = None,
+    ) -> None:
+        """Write a human-readable strategy report after recon ends.
 
         Read by the gate (CLI prompt between recon and harvest) so the
-        operator can decide: continue / stop / edit requirement. Failure
-        to generate the report does NOT block DONE — recon is complete
+        operator can decide: continue / narrow scope / stop. Failure to
+        generate the LLM portion does NOT block DONE — recon is complete
         regardless.
+
+        The universe section at the top is the gate's primary decision
+        input: bounded vs unbounded, size estimate, catalog pointer.
         """
+        run_dir = Config.run_dir(self.domain)
         try:
             semantic, procedural = await db.load_both_models(self.domain)
 
-            samples_dir = Config.run_dir(self.domain) / "samples"
+            samples_dir = run_dir / "samples"
             sample_count = 0
             sample_listing = "(none)"
             if samples_dir.is_dir():
@@ -704,6 +731,44 @@ class ReconPlanner:
                     if sample_count > 20:
                         sample_listing += f"\n... ({sample_count - 20} more)"
 
+            catalog_dir = run_dir / "catalog"
+            catalog_count = 0
+            catalog_listing = "(none)"
+            if catalog_dir.is_dir():
+                cfiles = sorted(p for p in catalog_dir.iterdir() if p.is_file())
+                catalog_count = len(cfiles)
+                if cfiles:
+                    catalog_listing = "\n".join(
+                        f"- {p.name} ({p.stat().st_size} bytes)" for p in cfiles[:20]
+                    )
+                    if catalog_count > 20:
+                        catalog_listing += f"\n... ({catalog_count - 20} more)"
+
+            # Universe header — sourced from audit if available, else
+            # heuristic from disk. This is the FIRST thing the human reads.
+            if audit_result is not None and getattr(audit_result, "universe", None):
+                u = audit_result.universe
+                universe_header = (
+                    f"- Bounded: {'yes' if u.bounded else 'NO (gate decision needed)'}\n"
+                    f"- Size estimate: {u.size_estimate}\n"
+                    f"- Catalog pointer: {u.catalog_pointer}\n"
+                )
+            else:
+                universe_header = (
+                    f"- Bounded: unknown (no audit data)\n"
+                    f"- Size estimate: unknown\n"
+                    f"- Catalog pointer: see catalog/ listing below\n"
+                )
+
+            blocked_header = ""
+            if blocked_reason:
+                blocked_header = (
+                    f"## ⚠ Planner declared BLOCKED\n\n{blocked_reason}\n\n"
+                    "Reconnaissance ended without a clean audit. Review the WM "
+                    "and decide whether to launch harvest anyway, retry recon, "
+                    "or narrow the requirement.\n\n"
+                )
+
             system_prompt = (
                 "You are summarizing reconnaissance results for a human operator "
                 "who is about to decide whether to start the harvest stage. Be "
@@ -713,7 +778,8 @@ class ReconPlanner:
                 "3. What auth is required (none / cookies / login / 2FA)?\n"
                 "4. What anti-bot defenses were observed?\n"
                 "5. How many samples are on disk? In what format?\n"
-                "6. Estimated total data volume if recon discovered it.\n"
+                "6. Universe enumeration: is catalog/ complete? bounded? how does\n"
+                "   the procedural model say to enumerate it?\n"
                 "7. Any specific concerns the operator should know before harvest.\n\n"
                 "Do NOT recommend a harvest tier or specific tools — the harvest "
                 "agent decides its own approach. Stick to facts and observations."
@@ -722,11 +788,21 @@ class ReconPlanner:
                 f"## Requirement\n{self.requirement}\n\n"
                 f"## Semantic Model\n{semantic or '(empty)'}\n\n"
                 f"## Procedural Model\n{procedural or '(empty)'}\n\n"
-                f"## Samples ({sample_count})\n{sample_listing}"
+                f"## Samples ({sample_count})\n{sample_listing}\n\n"
+                f"## Catalog ({catalog_count} files)\n{catalog_listing}"
             )
 
             response_text = await self.llm.generate(prompt=user_msg, system=system_prompt)
-            report_text = response_text or "(LLM produced empty report)"
+            llm_section = response_text or "(LLM produced empty report)"
+
+            report_text = (
+                "# Strategy Report\n\n"
+                f"{blocked_header}"
+                "## Universe (read FIRST — drives the gate decision)\n\n"
+                f"{universe_header}\n"
+                "## LLM Summary\n\n"
+                f"{llm_section}\n"
+            )
         except Exception as e:
             logger.warning(f"strategy_report generation failed: {e}")
             report_text = (
@@ -736,7 +812,7 @@ class ReconPlanner:
                 f"`read_world_model` or query the DB for context."
             )
 
-        report_path = Config.run_dir(self.domain) / "strategy_report.md"
+        report_path = run_dir / "strategy_report.md"
         report_path.write_text(report_text, encoding="utf-8")
         logger.info(f"Strategy report written to {report_path}")
 

@@ -274,15 +274,22 @@ async def run_harvest(
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
 
-    # Compile acceptance checklist from requirement (replaces the old LLM
-    # verifier subagent). One LLM call up front; mark_done then runs the
-    # mechanical checks. If this fails, a stub is written and the harvest
-    # still proceeds — better partial verification than none.
+    # Compile acceptance checklist from requirement + catalog + procedural
+    # model (the universe is the quantitative authority, not the requirement).
+    # One LLM call up front; mark_done then runs the mechanical checks. If
+    # this fails, a stub is written and the harvest still proceeds — better
+    # partial verification than none.
     workspace = run_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     samples_dir = run_dir / "samples"
+    catalog_dir = run_dir / "catalog"
     checklist_path = workspace / "checklist.md"
-    ok = await compile_checklist(llm, requirement, samples_dir, checklist_path)
+    _, procedural_model = await db.load_both_models(domain)
+    ok = await compile_checklist(
+        llm, requirement, samples_dir, checklist_path,
+        catalog_dir=catalog_dir,
+        procedural_model=procedural_model,
+    )
     logger.info(f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: {checklist_path}")
 
     # Attach deps for mark_done (it reads these off ctx to call verification)

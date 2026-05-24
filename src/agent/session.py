@@ -200,13 +200,64 @@ For any page you're extracting from, prefer:
 browse() Data Signals section shows which paths exist on the current page. \
 Follow the signals.
 
+## Universe Enumeration (harvest hand-off)
+
+Reconnaissance is the upstream of harvest. Beyond understanding the site, \
+you produce the **universe** — the enumerable list of every entity the \
+harvest stage will need to fetch. Without this, harvest doesn't know what \
+"all of it" means and can't verify completion.
+
+WHAT THE UNIVERSE IS.
+The universe is the catalog of all candidates matching the requirement's \
+scope. Examples:
+  • Mission "all pens tagged webgl on codepen" → universe = list of every \
+    pen ID returned by the webgl tag listing (cursor-paginated to the end).
+  • Mission "all articles in /docs/" → universe = list of every doc URL \
+    from the sitemap or the docs index.
+  • Mission "every product in category X" → universe = list of every \
+    product slug from the category listing across all pages.
+
+WHERE THE UNIVERSE LIVES.
+Save the universe under `catalog/` with `save_as` + `kind='catalog'`. \
+Free schema — JSON / JSONL / CSV / TXT, whatever fits the site. Must \
+contain a per-entity unique identifier (ID, slug, URL — your call). One \
+file containing the full list is ideal; multiple files (e.g. per-category \
+listings) is fine as long as the procedural model documents how to \
+combine them.
+
+HOW MUCH TO ENUMERATE.
+Default: **enumerate to completion** during recon — even if it means \
+paginating to the end. Harvest depends on this being complete; a partial \
+catalog leaks into harvest as silent under-collection.
+
+If the universe is truly unbounded or unreasonably large (infinite \
+scrolling feed, search returning millions, no exhaustion mechanism), do \
+NOT silently truncate. Instead:
+  • Save what's reasonable to `catalog/` (e.g. first N pages)
+  • Document in the procedural model: **"Universe unbounded — gate \
+    required."** Include WHY (no total / no exhaustion API / >10K entries) \
+    and HOW harvest would enumerate (the paging method).
+The strategy report surfaces this so a human can decide on a narrower \
+scope before harvest starts.
+
+IN THE PROCEDURAL MODEL.
+Write a short section near the top:
+  • Universe size: N (or "unbounded — gate required")
+  • Universe location: catalog/<file>
+  • Enumeration method: how to walk the universe (cursor field / page \
+    range / sitemap parse / API endpoint with params)
+
 ## Boundaries
 
 - Every site is different. Don't assume URL patterns or data schemas.
 - 'Sample' means REAL DATA ON DISK — image bytes, file content, full text — \
 **not** metadata records or URL strings. Listing JSON is NOT a sample.
-- Mission is done when (a) briefing objectives are addressed AND \
-(b) you have Layer-3 samples for every data type discovered."""
+- Catalog ≠ sample. The catalog defines the universe (what to harvest), \
+samples prove the extraction method works. Both are required.
+- Mission is done when (a) briefing objectives are addressed, (b) you \
+have Layer-3 samples for every data type discovered, AND (c) the \
+universe is enumerated to `catalog/` (or explicitly marked unbounded \
+with enumeration method documented)."""
 
 
 # ── Microcompact config ──────────────────────────────────
