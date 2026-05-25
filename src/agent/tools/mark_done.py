@@ -76,24 +76,63 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
     workspace = Config.run_dir(domain) / "workspace"
     checklist_path = workspace / "checklist.md"
 
+    # Tamper detection: launcher pinned the original checklist's sha256 onto
+    # ctx (in-memory, agent cannot read or modify). If the file on disk no
+    # longer matches, the agent has edited the acceptance contract —
+    # invariably a satisficing attempt — and we FAIL closed.
+    # See 2026-05-25 svg harvest: agent rewrote `## C1.` to `## C1:` and
+    # `**criterion**:`/`**check**:` fields so the parser found 0 criteria,
+    # then exploited the auto-PASS fallback. Hash check blocks the same path.
+    expected_hash = getattr(ctx, "_checklist_sha256", None)
+    if expected_hash and checklist_path.is_file():
+        import hashlib
+        current_hash = hashlib.sha256(checklist_path.read_bytes()).hexdigest()
+        if current_hash != expected_hash:
+            logger.warning(
+                f"mark_done: checklist tampered. "
+                f"expected={expected_hash[:16]}... current={current_hash[:16]}..."
+            )
+            return (
+                "VERIFICATION FAIL — checklist.md was modified after mission "
+                "start.\n\n"
+                "The checklist is the acceptance contract pinned at launch; "
+                "you cannot edit it. Editing it (even via apply_patch / bash) "
+                "is a satisficing attempt and will always FAIL.\n\n"
+                "If a check command is genuinely wrong for the requirement, "
+                "complete what the (mis-compiled) check actually verifies — "
+                "the checklist is mechanical, not interpretive.\n\n"
+                f"Expected sha256: {expected_hash[:16]}...\n"
+                f"Current sha256:  {current_hash[:16]}...\n\n"
+                "To proceed: restore the original checklist content, or "
+                "address the original criteria as compiled."
+            )
+
     # Lazy import to avoid coupling the tool module to harvest internals
     from src.harvest.checklist import run_all_checks, format_results
 
     results = await run_all_checks(checklist_path, workspace)
 
     if not results:
-        # No checklist or it parsed to 0 criteria — fall back to agent claim.
-        # The launcher would normally have written at least a stub; if even
-        # that is missing, we don't block the mission.
-        ctx._mission_done = True
+        # Fail-closed: parse failure (corrupt checklist / missing file) is
+        # NOT a free pass. The previous auto-PASS fallback was abused by a
+        # harvest agent rewriting headers to defeat the parser. If the
+        # acceptance contract is unreadable, the mission cannot be verified
+        # and therefore cannot be marked done.
         logger.warning(
-            f"mark_done: no checklist criteria at {checklist_path}, "
-            "auto-PASS based on agent reason"
+            f"mark_done: no parseable checklist criteria at {checklist_path}, "
+            "FAILing closed"
         )
         return (
-            f"VERIFICATION SKIPPED — no parseable checklist at "
-            f"{checklist_path}. Mission marked complete based on agent reason.\n\n"
-            f"Reason: {reason}"
+            "VERIFICATION FAIL — checklist.md exists but the parser found 0 "
+            "criteria.\n\n"
+            "Possible causes:\n"
+            "  - The checklist file is missing or empty\n"
+            "  - The format is wrong: each section MUST be `## C<N>.` (period, "
+            "not colon) followed by `**criterion**:` and `**check**: \\`...\\``\n"
+            "  - The checklist was edited and broke the parser\n\n"
+            "The acceptance contract is pinned at mission start — you cannot "
+            "rewrite it. If the original is still on disk and the parser "
+            "fails, this is a system bug and the mission cannot proceed."
         )
 
     all_passed = all(r.passed for r in results)

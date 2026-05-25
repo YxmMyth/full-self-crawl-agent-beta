@@ -292,6 +292,20 @@ async def run_harvest(
     )
     logger.info(f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: {checklist_path}")
 
+    # Compute checksum of the original compiled checklist. Stored on ctx
+    # (in-memory, agent has no way to read or modify it). mark_done verifies
+    # this against the file on disk before parsing — if the agent has tampered
+    # with checklist.md, the hashes diverge and mark_done returns FAIL with a
+    # clear "you can't edit the acceptance contract" message.
+    # Discovered 2026-05-25 svg harvest: agent rewrote checklist headers so
+    # the parser found 0 criteria, triggering the (now-removed) auto-PASS
+    # fallback. Without this hash defense, the same satisficing path is open.
+    import hashlib
+    ctx._checklist_sha256 = hashlib.sha256(
+        checklist_path.read_bytes()
+    ).hexdigest()
+    logger.info(f"Checklist sha256: {ctx._checklist_sha256[:16]}...")
+
     # Attach deps for mark_done (it reads these off ctx to call verification)
     ctx._llm = llm
     ctx._requirement = requirement
