@@ -46,7 +46,6 @@ from src.agent.tools import (
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
-from src.harvest.checklist import compile_checklist
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
 from src.runtime.human_assist import TkinterPopupGateway
@@ -274,39 +273,16 @@ async def run_harvest(
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
 
-    # Compile acceptance checklist from requirement + catalog + procedural
-    # model (the universe is the quantitative authority, not the requirement).
-    # One LLM call up front; mark_done then runs the mechanical checks. If
-    # this fails, a stub is written and the harvest still proceeds — better
-    # partial verification than none.
+    # No pre-compiled checklist. mark_done runs the harvest audit (single
+    # LLM call seeing actual disk state) when called. Previously we compiled
+    # bash checks here, but that proved to fortune-tell — the LLM at compile
+    # time didn't know what data harvest would produce, so checks were
+    # frequently over-narrow (svg run: `file --mime-type | grep text/plain`
+    # rejected `application/javascript`). LLM late-bind audit avoids this.
     workspace = run_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    samples_dir = run_dir / "samples"
-    catalog_dir = run_dir / "catalog"
-    checklist_path = workspace / "checklist.md"
-    _, procedural_model = await db.load_both_models(domain)
-    ok = await compile_checklist(
-        llm, requirement, samples_dir, checklist_path,
-        catalog_dir=catalog_dir,
-        procedural_model=procedural_model,
-    )
-    logger.info(f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: {checklist_path}")
 
-    # Compute checksum of the original compiled checklist. Stored on ctx
-    # (in-memory, agent has no way to read or modify it). mark_done verifies
-    # this against the file on disk before parsing — if the agent has tampered
-    # with checklist.md, the hashes diverge and mark_done returns FAIL with a
-    # clear "you can't edit the acceptance contract" message.
-    # Discovered 2026-05-25 svg harvest: agent rewrote checklist headers so
-    # the parser found 0 criteria, triggering the (now-removed) auto-PASS
-    # fallback. Without this hash defense, the same satisficing path is open.
-    import hashlib
-    ctx._checklist_sha256 = hashlib.sha256(
-        checklist_path.read_bytes()
-    ).hexdigest()
-    logger.info(f"Checklist sha256: {ctx._checklist_sha256[:16]}...")
-
-    # Attach deps for mark_done (it reads these off ctx to call verification)
+    # Attach deps for mark_done (it reads these off ctx to call the audit)
     ctx._llm = llm
     ctx._requirement = requirement
     # _domain is attached by AgentSession.__init__

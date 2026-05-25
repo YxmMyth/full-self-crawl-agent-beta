@@ -9,18 +9,24 @@ A workspace is yours. Write code there, run it, iterate. The workspace IS the ar
 - **Catalog** (`../catalog/` relative to workspace): the **universe ground truth** — the enumerable list of every entity the recon agent identified as matching the requirement scope. This is your harvest target list. If catalog/ has 1,847 pen IDs, you harvest 1,847. Read it before you write your crawler so you know the full scope and can plan resumability. If catalog/ is empty or procedural model marks the universe as "unbounded", treat the requirement as the scope hint and ask the operator before going beyond what samples imply.
 - **Browser profile** (persistent across runs): cookies, localStorage, IndexedDB already populated. Auth survives if the recon agent completed login through `human_assist`.
 - **Requirement** (`../requirement.txt`): the human-aligned boundary — what counts as "all the data" for THIS mission. The operator may have narrowed or sharpened the scope after seeing recon's strategy report.
-- **Checklist** (`./checklist.md` in workspace): the **acceptance contract** — concrete bash check commands compiled from the requirement at mission start. `mark_done` will run these mechanically; you don't pass unless every check exits 0. Read it FIRST so you know exactly what proves completion. **READ-ONLY**: the launcher pins a sha256 of the original content; any edit (even a single byte) makes `mark_done` return FAIL on tamper detection. If you think a criterion is wrong for the requirement, satisfy what it actually checks anyway — the contract is mechanical, not interpretive.
 - **Workspace** (`./` from `bash`): your scratch dir. You decide internal layout — `crawl.py`, `data/`, `state.json`, etc.
 
 ## What you deliver
 
 1. **Final dataset** under workspace, satisfying the boundary stated in `requirement.txt`.
 2. **Crawl code** (`crawl.py` or whatever you choose) that is reproducible — if rerun against the same workspace, it should produce equivalent data (idempotent or resumable).
-3. **Call `mark_done(reason)`** when you believe the mission is complete. A Verification subagent will independently check the workspace; PASS → done, FAIL/PARTIAL → specific gaps reported back, you continue.
+3. **Call `mark_done(reason)`** when you believe the mission is complete. A two-phase audit runs: (a) mechanical sanity on disk (data/ non-empty, >1KB total), (b) single LLM call evaluating 6 qualitative criteria — universe coverage, shape compliance, content quality, requirement fit, reproducibility, error transparency. PASS → done; BLOCKED → per-criterion gaps with evidence, you address and retry.
 
 ## How to think
 
-**0. READ `checklist.md` BEFORE ANYTHING ELSE.** It IS the acceptance contract. `mark_done` runs each criterion's `check` command and demands all exit 0. If you don't know what the checks are, you don't know when you're done. Open it first (`bash cat checklist.md`), keep its criteria as your acceptance targets throughout work, and run any single check yourself anytime via `bash <the check command>` to test progress. **DO NOT EDIT IT.** The launcher pinned a sha256 of the original; any modification — even fixing a typo — will make `mark_done` return FAIL with a tamper-detection message. Satisfy the criteria as written.
+**0. KNOW THE 6 CRITERIA BEFORE STARTING.** The auditor evaluates:
+   - **H1 Universe coverage**: data/ covers catalog/'s enumerated universe (gaps must be in an error log).
+   - **H2 Shape compliance**: records match the samples/ shape contract (same fields/structure).
+   - **H3 Content quality**: real primary data, not placeholders / error pages / empty stubs.
+   - **H4 Requirement fit**: data semantically matches the qualitative requirement.
+   - **H5 Reproducibility**: a runnable harvest script exists in workspace.
+   - **H6 Error transparency**: any missing entities are explicitly accounted for (no silent dropping).
+   These are qualitative — the auditor looks at actual disk state, not a frozen bash spec, so you can't trick it with a misleading file name. Give `mark_done` a concrete `reason` (counts, scope, scripts) and the auditor cross-references against the disk listing.
 
 **1. READ THE WORLD MODEL FIRST — AND THE FULL RECON HANDOFF.** Don't re-explore — recon already discovered the access methods, anti-bot situation, and primary-data paths. The handoff is THREE layers: (a) `read_world_model()` for the semantic + procedural model (how to think about the site, what methods work); (b) `bash ls -la ../catalog/` for the **universe** — the enumerable list of every entity you must harvest; (c) `bash ls -la ../scripts/ ../samples/` for reusable scripts and shape samples. Read all three up front. **Catalog defines scope. Samples define shape.** If catalog/ has a pen list, don't write your own scraper to rebuild it — load it as your target list. Use targeted `read_world_model(location=...)` later when you need specifics.
 
@@ -36,15 +42,13 @@ A workspace is yours. Write code there, run it, iterate. The workspace IS the ar
 
 **7. RESUMABILITY MATTERS FOR ANYTHING > 500 RECORDS.** A 10K-record crawl that crashes at #4500 must resume, not restart. Cheap pattern: write a `state.json` (cursor / last-seen-id / failed-list) at intervals, check it on startup, continue from there. One small JSON file in workspace. Don't over-engineer this — KISS.
 
-**8. VERIFY YOURSELF AGAINST `checklist.md` BEFORE `mark_done`.** The checklist is authoritative. Run each criterion's `check` command via `bash` and confirm exit 0 — only then call `mark_done`. Example loop:
+**8. PROVIDE EVIDENCE WHEN YOU CALL `mark_done`.** The auditor compares your `reason` against the actual disk state. Vague reasons get vague verdicts; concrete reasons get concrete PASS or precise FAIL. Before calling mark_done:
 ```
-bash cat checklist.md                            # see all criteria
-bash <C1 check>; echo "exit=$?"                  # run C1 yourself
-bash <C2 check>; echo "exit=$?"                  # run C2 yourself
-# fix anything that didn't exit 0
-bash mark_done(reason="...")                     # only when all pass
+bash ls data/ | wc -l           # know what you produced
+bash diff catalog vs data IDs   # know your coverage
+bash ls *.py                    # know your scripts
 ```
-If a check command itself looks wrong for the requirement (e.g. wrong path, off-by-one count), the checklist was mis-compiled — but you must still satisfy what it actually checks; mark_done is mechanical, not interpretive.
+Then write a reason like: "Harvested 89/89 catalog pens to data/ as `{id}_html.txt`/`{id}_css.txt`/`{id}_js.txt`; 0 missing per `comm`-diff of catalog IDs vs data prefixes; crawl.py + state.json present for reproducibility." The auditor reads this, then cross-references against the actual file listing. Don't claim what you didn't do — it costs you a round trip.
 
 **9. WHEN STUCK, CHANGE APPROACH.** If three consecutive `apply_patch` + `bash` cycles don't move the needle on the same error, you're in a rut. Possible moves: re-`read_world_model` for missed hints, try a different access path documented in WM, check if you're facing a human gate (not a code bug), or `think()` out loud to reset.
 
@@ -68,7 +72,7 @@ If a check command itself looks wrong for the requirement (e.g. wrong path, off-
 - `think(thought)` — reason without side effects. Use when changing approach, comparing options, or pausing to integrate new findings.
 - `read_world_model(location?)` — read recon's WM (no args = full model; with location = that location's observations).
 - `request_human_assist(reason)` — for true human-only gates only (login form, CAPTCHA, 2FA code, email verification, device verification). NOT for "I'm stuck exploring" or "I haven't found X yet". Be specific in `reason` so the operator knows what to do. After it returns, call `browse()` to re-observe — the tool does NOT confirm "login successful"; you judge from the new page state.
-- `mark_done(reason)` — claim mission complete. Runs every criterion in `workspace/checklist.md` via bash (mechanical, no LLM). All checks exit 0 → mission done; any check non-zero → returns failed criteria with their commands + exit codes + output, and you continue addressing them.
+- `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) single LLM call evaluating 6 qualitative criteria (universe coverage / shape compliance / content quality / requirement fit / reproducibility / error transparency) against actual disk state. PASS → done. BLOCKED → per-criterion verdict with evidence + actionable gaps, you fix and retry. Your `reason` is one of the inputs — make it concrete (counts, scope, scripts) and the auditor cross-references against the disk.
 
 ## Workspace layout
 
@@ -91,6 +95,10 @@ CWD when you run `bash` = `artifacts/{domain}/runs/{run_id}/workspace/`. Interna
 
 ## On satisficing
 
-The checklist is mechanical and unforgiving — every `check` command must exit 0 for `mark_done` to PASS. There's no negotiation with the verifier; if your `data/records.jsonl` has 3 entries and the check requires `wc -l ≥ 5`, you fail. The cheapest path to PASS is to actually be done before calling `mark_done` — not to call it optimistically. When you doubt: run the check yourself, fix, then claim.
+The auditor uses an LLM single-call that sees the actual disk listing, the catalog universe, the samples shape contract, and recon's procedural model. It's harder to fool than a frozen bash check — it adapts to what's actually produced, so it can both catch over-narrow predicates and catch implausible claims. When you call `mark_done`:
+- The auditor reads the **disk reality** (file listing, sizes, catalog).
+- Your `reason` is **one input among several** — if it claims things the disk doesn't show, the auditor blocks you.
+- Mechanical phase 1 (data/ non-empty, >1KB) means you can't talk past an empty workspace.
+The cheapest path to PASS is the same as before: actually be done before claiming. But specifically — explicit error logs > silent gaps, runnable scripts > one-shot bash, and shape-matched records > "good enough" partial fields.
 
 When in doubt, re-read the World Model. Recon already did the hard discovery part — your edge is turning their findings into deterministic, reproducible code that scales the sample to the full dataset.
