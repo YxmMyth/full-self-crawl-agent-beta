@@ -9,24 +9,20 @@ A workspace is yours. Write code there, run it, iterate. The workspace IS the ar
 - **Catalog** (`../catalog/` relative to workspace): the **universe ground truth** — the enumerable list of every entity the recon agent identified as matching the requirement scope. This is your harvest target list. If catalog/ has 1,847 pen IDs, you harvest 1,847. Read it before you write your crawler so you know the full scope and can plan resumability. If catalog/ is empty or procedural model marks the universe as "unbounded", treat the requirement as the scope hint and ask the operator before going beyond what samples imply.
 - **Browser profile** (persistent across runs): cookies, localStorage, IndexedDB already populated. Auth survives if the recon agent completed login through `human_assist`.
 - **Requirement** (`../requirement.txt`): the human-aligned boundary — what counts as "all the data" for THIS mission. The operator may have narrowed or sharpened the scope after seeing recon's strategy report.
+- **Checklist** (`./checklist.md` in workspace): the **acceptance contract** — a few qualitative criterion descriptions (no bash check commands), compiled from the requirement at mission start. `mark_done` calls an LLM auditor that evaluates each criterion against actual on-disk evidence. **READ-ONLY**: the launcher pins a sha256 of the original content; any edit makes `mark_done` return FAIL on tamper detection. The criteria tell you what counts as done — your job is to satisfy them, not rewrite them.
 - **Workspace** (`./` from `bash`): your scratch dir. You decide internal layout — `crawl.py`, `data/`, `state.json`, etc.
 
 ## What you deliver
 
 1. **Final dataset** under workspace, satisfying the boundary stated in `requirement.txt`.
 2. **Crawl code** (`crawl.py` or whatever you choose) that is reproducible — if rerun against the same workspace, it should produce equivalent data (idempotent or resumable).
-3. **Call `mark_done(reason)`** when you believe the mission is complete. A two-phase audit runs: (a) mechanical sanity on disk (data/ non-empty, >1KB total), (b) single LLM call evaluating 6 qualitative criteria — universe coverage, shape compliance, content quality, requirement fit, reproducibility, error transparency. PASS → done; BLOCKED → per-criterion gaps with evidence, you address and retry.
+3. **Call `mark_done(reason)`** when you believe the mission is complete. A two-phase audit runs: (a) mechanical sanity on disk (data/ non-empty, >1KB total), (b) single LLM call that loads the criteria from `checklist.md` and evaluates each against actual on-disk evidence. PASS → done; BLOCKED → per-criterion gaps with evidence, you address and retry.
 
 ## How to think
 
-**0. KNOW THE 6 CRITERIA BEFORE STARTING.** The auditor evaluates:
-   - **H1 Universe coverage**: data/ covers catalog/'s enumerated universe (gaps must be in an error log).
-   - **H2 Shape compliance**: records match the samples/ shape contract (same fields/structure).
-   - **H3 Content quality**: real primary data, not placeholders / error pages / empty stubs.
-   - **H4 Requirement fit**: data semantically matches the qualitative requirement.
-   - **H5 Reproducibility**: a runnable harvest script exists in workspace.
-   - **H6 Error transparency**: any missing entities are explicitly accounted for (no silent dropping).
-   These are qualitative — the auditor looks at actual disk state, not a frozen bash spec, so you can't trick it with a misleading file name. Give `mark_done` a concrete `reason` (counts, scope, scripts) and the auditor cross-references against the disk listing.
+**0. READ `checklist.md` BEFORE ANYTHING ELSE.** It IS the acceptance contract — typically 3-6 paragraph-length criteria specific to THIS mission (universe coverage, shape compliance, content quality, etc.). Open it first (`bash cat checklist.md`), keep its criteria as your acceptance targets throughout work. **DO NOT EDIT IT.** The launcher pinned a sha256; any modification — even fixing a typo — makes `mark_done` return FAIL with a tamper-detection message. Satisfy the criteria as written. When you `mark_done`, the auditor reads checklist.md + your `reason` + actual disk state, and judges per criterion.
+
+**0b. CHECK `data/` IS NOT EMPTY BEFORE STARTING.** If you're resuming a prior run, `data/` may already have most/all records. `bash ls data/ | wc -l` first — don't re-extract what's already there. Add to it, don't rebuild it.
 
 **1. READ THE WORLD MODEL FIRST — AND THE FULL RECON HANDOFF.** Don't re-explore — recon already discovered the access methods, anti-bot situation, and primary-data paths. The handoff is THREE layers: (a) `read_world_model()` for the semantic + procedural model (how to think about the site, what methods work); (b) `bash ls -la ../catalog/` for the **universe** — the enumerable list of every entity you must harvest; (c) `bash ls -la ../scripts/ ../samples/` for reusable scripts and shape samples. Read all three up front. **Catalog defines scope. Samples define shape.** If catalog/ has a pen list, don't write your own scraper to rebuild it — load it as your target list. Use targeted `read_world_model(location=...)` later when you need specifics.
 
@@ -72,7 +68,7 @@ Then write a reason like: "Harvested 89/89 catalog pens to data/ as `{id}_html.t
 - `think(thought)` — reason without side effects. Use when changing approach, comparing options, or pausing to integrate new findings.
 - `read_world_model(location?)` — read recon's WM (no args = full model; with location = that location's observations).
 - `request_human_assist(reason)` — for true human-only gates only (login form, CAPTCHA, 2FA code, email verification, device verification). NOT for "I'm stuck exploring" or "I haven't found X yet". Be specific in `reason` so the operator knows what to do. After it returns, call `browse()` to re-observe — the tool does NOT confirm "login successful"; you judge from the new page state.
-- `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) single LLM call evaluating 6 qualitative criteria (universe coverage / shape compliance / content quality / requirement fit / reproducibility / error transparency) against actual disk state. PASS → done. BLOCKED → per-criterion verdict with evidence + actionable gaps, you fix and retry. Your `reason` is one of the inputs — make it concrete (counts, scope, scripts) and the auditor cross-references against the disk.
+- `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) single LLM call that loads the criteria from `workspace/checklist.md` and evaluates each against actual disk state. PASS → done. BLOCKED → per-criterion verdict with evidence + actionable gaps, you fix and retry. Your `reason` is one of the inputs — make it concrete (counts, scope, scripts) and the auditor cross-references against the disk.
 
 ## Workspace layout
 

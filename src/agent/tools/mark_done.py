@@ -1,28 +1,36 @@
 """mark_done — harvest agent claims mission complete.
 
-Triggers the harvest LLM audit (src/harvest/audit.py). On overall=PASS,
-sets ctx._mission_done so AgentSession's loop exits. On BLOCKED, returns
-per-criterion feedback so the agent can address gaps and retry.
+Triggers the harvest LLM audit (src/harvest/audit.py). The audit loads
+mission-specific criteria from workspace/checklist.md (compiled by the
+launcher at mission start) and evaluates each against actual on-disk
+evidence. On overall=PASS, sets ctx._mission_done. On BLOCKED, returns
+per-criterion feedback.
 
-Previously this ran a pre-compiled bash checklist (workspace/checklist.md).
-Replaced 2026-05-25 after the svg run deadlocked: the LLM-compiled bash
-check (`file --mime-type | grep text/plain`) rejected `application/javascript`
-files even though "non-binary" criterion was satisfied. Root cause was
-fortune-telling — checks were compiled before any data existed, then
-frozen. LLM late-bind audit avoids that by seeing actual disk state.
+This replaces the previous bash-checklist mechanism (deleted in 0993590).
+The mistake there was deleting the checklist artifact too — agent lost
+the "I know what done means" anchor. Restored 2026-05-25: checklist.md
+keeps criterion descriptions (no bash), audit reads them at verify time.
+
+Tamper resistance: the launcher pins sha256(checklist.md) onto ctx. We
+verify the on-disk file matches before invoking the audit — any edit
+fails the mission immediately, with a clear "you can't edit the
+acceptance contract" message.
 
 Requires the following attribute on ctx (attached by harvest launcher):
-  - ctx._domain      : the domain string
-  - ctx._llm         : LLMClient for the audit's generate() call
-  - ctx._requirement : the requirement text the audit checks against
+  - ctx._domain             : the domain string
+  - ctx._llm                : LLMClient for the audit's generate() call
+  - ctx._requirement        : the requirement text the audit checks against
+  - ctx._checklist_sha256   : pinned hash for tamper detection
 
-See: src/harvest/audit.py for the audit phases + criteria.
+See: src/harvest/audit.py + src/harvest/checklist.py.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
+from src.config import Config
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -90,6 +98,32 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
             "This is a launcher bug, not your fault."
         )
     requirement = getattr(ctx, "_requirement", "") or ""
+
+    # Tamper detection: launcher pinned the original checklist's sha256
+    # onto ctx (in-memory, agent cannot read or modify). If the file on
+    # disk no longer matches, agent has edited the acceptance contract —
+    # invariably a satisficing attempt — and we FAIL closed.
+    checklist_path = Config.run_dir(domain) / "workspace" / "checklist.md"
+    expected_hash = getattr(ctx, "_checklist_sha256", None)
+    if expected_hash and checklist_path.is_file():
+        current_hash = hashlib.sha256(checklist_path.read_bytes()).hexdigest()
+        if current_hash != expected_hash:
+            logger.warning(
+                f"mark_done: checklist tampered. "
+                f"expected={expected_hash[:16]}... current={current_hash[:16]}..."
+            )
+            return (
+                "VERIFICATION FAIL — checklist.md was modified after mission "
+                "start.\n\n"
+                "The checklist is the acceptance contract pinned at launch; "
+                "you cannot edit it. Editing it (even via apply_patch / bash) "
+                "is a satisficing attempt and will always FAIL.\n\n"
+                "If a criterion is genuinely wrong for the requirement, "
+                "satisfy what it actually says — the contract is the contract.\n\n"
+                f"Expected sha256: {expected_hash[:16]}...\n"
+                f"Current sha256:  {current_hash[:16]}...\n\n"
+                "To proceed: restore the original checklist content."
+            )
 
     # Lazy import to avoid coupling this tool to harvest internals at import time
     from src.harvest.audit import run_audit

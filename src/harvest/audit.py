@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.config import Config
+from src.harvest.checklist import Criterion, parse_checklist
 from src.llm.client import LLMClient
 from src.utils.logging import get_logger
 from src.world_model import db
@@ -47,14 +48,19 @@ _MIN_DATA_TOTAL_BYTES = 1024   # combined size > 1KB (defends against
 
 
 # ── Phase 2 system prompt ──────────────────────────────────
+#
+# Criteria are NOT hardcoded here. The launcher compiles them to
+# workspace/checklist.md at mission start (mission-specific, references
+# this catalog/sample/universe by name). The audit loads them at
+# verification time and renders them into the prompt below.
 
-_AUDIT_SYSTEM_PROMPT = """You are auditing whether a harvest agent has truly \
-completed its mission.
+_AUDIT_SYSTEM_PROMPT_TEMPLATE = """You are auditing whether a harvest agent has \
+truly completed its mission.
 
 The agent has called mark_done. Your job is to verify the produced dataset
-against the requirement, the recon-provided universe and shape contracts,
-and the actual on-disk state. The agent WANTS to stop; your default bias
-is skepticism.
+against the criteria compiled at mission start (shown below), the recon-
+provided universe and shape contracts, and the actual on-disk state. The
+agent WANTS to stop; your default bias is skepticism.
 
 ## Completion Audit Discipline (borrowed from codex /goal)
 
@@ -74,105 +80,74 @@ intent or plausible-looking claims.
 - Do NOT mark a criterion PASS merely because the agent says so — agent
   reasoning is one input, the on-disk reality is the other.
 
-## The 6 Criteria
+## Criteria from checklist.md (compiled at mission start, hash-pinned)
 
-H1 — Universe coverage
-  data/ covers the catalog/ universe enumerated by recon. Compare the set
-  of unique record identifiers (filename prefixes, IDs in the catalog
-  files) between data/ and catalog/. Every catalog entity should have a
-  corresponding data record, OR be explicitly accounted for in an error
-  log (e.g. harvest_errors.txt naming dead/404 entities).
-
-  If recon marked universe "unbounded" in the procedural model, fall back
-  to checking that data/ contains a reasonable sample of the requirement
-  scope (e.g. cursor walked to the end of the listing the operator
-  approved at the gate).
-
-  FAIL conditions:
-    - data/ is empty or much smaller than catalog universe with no
-      error log explaining the gap
-    - data/ contains entities NOT in catalog (scope creep)
-
-H2 — Shape compliance
-  Harvested records have the same field set / structure as the recon
-  samples (`samples/`). samples/ is the shape contract — if a sample has
-  fields {title, body, author, comments} and a harvested record has only
-  {title, body}, you are missing the contract.
-
-  For multi-file records (e.g. `{id}_html.txt` + `{id}_css.txt` +
-  `{id}_js.txt`), ALL three must exist per record (unless recon's
-  procedural model explicitly documented a panel as optional).
-
-  PARTIAL if a small minority is missing optional fields; FAIL if a
-  majority is missing required fields.
-
-H3 — Content quality
-  Spot-check harvested records: they must be the real primary data, not
-  placeholder pages / error pages / login redirects / empty stubs.
-
-  Red flags to look for in the file listing (sizes) and any sample
-  content snippets the agent provides:
-    - file size = 0 bytes or implausibly small (e.g. <100B for an HTML)
-    - filenames that look like error pages (e.g. `error_*.txt`,
-      `404_*.txt`)
-    - high prevalence of identical file sizes (suggests templated
-      error page rather than real content)
-
-H4 — Requirement fit
-  The data actually satisfies the qualitative requirement, not just
-  "any data". If the requirement asks for "svg-related pens", confirm
-  the harvested records relate to SVG (the agent's reason should cite
-  evidence; absence of such cite is itself a signal).
-
-  This is the hardest criterion to verify from disk listing alone.
-  Use the agent's reason + the recon procedural model's documented
-  filters + the catalog's stated topic.
-
-H5 — Reproducibility
-  workspace/ contains at least one runnable harvest script (`crawl.py`,
-  `harvest.py`, `*.sh`, etc.) that — if rerun — would reproduce
-  equivalent data. The script doesn't have to be perfect, but it must
-  exist (or the agent must document why no script was needed, e.g.
-  "single hand-crafted record").
-
-H6 — Error transparency
-  If any catalog entities are missing from data/, there must be an
-  explicit accounting (an error log file in workspace, a documented
-  decision in the agent's reason). Silent dropping of entities is a
-  serious satisficing signal.
-
-  If data/ matches catalog 1:1 with no missing entities, this criterion
-  PASSes by virtue of having nothing to explain.
+{criteria_block}
 
 ## Output Format (strict)
 
 Return ONLY a single JSON object, no prose around it:
 
 ```json
-{
+{{
   "criteria": [
-    {"id": "H1", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "H2", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "H3", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "H4", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "H5", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."},
-    {"id": "H6", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."}
+    {{"id": "<criterion id>", "verdict": "PASS|FAIL|PARTIAL", "evidence": "...", "reason": "..."}}
+    // ... one entry per criterion above
   ],
   "overall": "PASS|BLOCKED",
   "blocking_summary": "If BLOCKED: 1-3 sentences of the biggest gaps the agent must address. Empty string if PASS."
-}
+}}
 ```
 
 Rules:
+- Output ONE criterion verdict per criterion in the checklist above —
+  match by `id` exactly (C1, C2, ...).
 - `evidence` quotes or cites the actual artifact you read (e.g., "catalog
   has 89 IDs per svg_search_all_pages.json, data has 89 distinct prefixes
   per file listing" or "all 267 *.txt files in data/ are >1KB").
 - `reason` explains why this verdict given the evidence. Concrete, not
   generic.
-- `overall` = PASS only if ALL 6 criteria are PASS. Any FAIL or PARTIAL
+- `overall` = PASS only if ALL criteria are PASS. Any FAIL or PARTIAL
   means BLOCKED.
 - `blocking_summary` is what the agent reads first — make it actionable.
 """
+
+
+def _render_criteria_block(criteria: list[Criterion]) -> str:
+    """Format checklist criteria for inclusion in the audit system prompt."""
+    if not criteria:
+        return (
+            "(No criteria parsed from workspace/checklist.md. This is a "
+            "bug — the launcher should have compiled at least 1 criterion. "
+            "Default to overall=BLOCKED with blocking_summary explaining "
+            "the checklist was unreadable.)"
+        )
+    lines: list[str] = []
+    for c in criteria:
+        lines.append(f"### {c.id}. {c.name}")
+        lines.append("")
+        lines.append(c.criterion)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _load_criteria(domain: str) -> list[Criterion]:
+    """Load + parse criteria from workspace/checklist.md.
+
+    Returns empty list if missing / unparseable. Caller (audit phase 2)
+    treats empty as a blocking error rather than auto-PASS — the contract
+    is supposed to exist.
+    """
+    checklist_path = Config.run_dir(domain) / "workspace" / "checklist.md"
+    if not checklist_path.is_file():
+        logger.warning(f"audit: checklist.md missing at {checklist_path}")
+        return []
+    try:
+        text = checklist_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"audit: failed to read checklist.md: {e}")
+        return []
+    return parse_checklist(text)
 
 
 # ── Result dataclasses ────────────────────────────────────
@@ -472,12 +447,22 @@ async def _run_llm_audit(
     domain: str,
     requirement: str,
     mark_done_reason: str,
+    criteria_list: list[Criterion],
 ) -> tuple[list[CriterionResult], str, str, str]:
-    """Run the LLM audit. Returns (criteria, overall, blocking_summary, raw)."""
+    """Run the LLM audit. Returns (criteria_results, overall, blocking_summary, raw).
+
+    criteria_list is the parsed checklist.md criteria (from launcher's
+    compile_checklist call). Each gets a verdict from the LLM against
+    actual disk evidence.
+    """
     # Load recon's procedural model — it has the universe definition and
-    # documented methods the auditor needs to evaluate H1/H2/H4.
+    # documented methods the auditor needs to evaluate criteria like
+    # universe coverage / shape compliance / requirement fit.
     _, procedural = await db.load_both_models(domain)
     context = _gather_context(domain)
+    system_prompt = _AUDIT_SYSTEM_PROMPT_TEMPLATE.format(
+        criteria_block=_render_criteria_block(criteria_list)
+    )
 
     user_msg = (
         f"# Requirement\n{requirement}\n\n"
@@ -489,7 +474,7 @@ async def _run_llm_audit(
         "Run the audit. Output the JSON object specified in the system prompt."
     )
 
-    raw = await llm.generate(prompt=user_msg, system=_AUDIT_SYSTEM_PROMPT)
+    raw = await llm.generate(prompt=user_msg, system=system_prompt)
     raw = raw or ""
 
     parsed = _parse_llm_audit(raw)
@@ -504,8 +489,8 @@ async def _run_llm_audit(
             "the raw response in the verification report.",
             raw,
         )
-    criteria, overall, blocking_summary = parsed
-    return criteria, overall, blocking_summary, raw
+    criteria_results, overall, blocking_summary = parsed
+    return criteria_results, overall, blocking_summary, raw
 
 
 # ── Public entrypoint ─────────────────────────────────────
@@ -552,9 +537,33 @@ async def run_audit(
         )
         return result
 
+    # Load criteria from checklist.md (compiled at mission start by launcher).
+    # If missing/unparseable, fail closed — agent can't be "done" against an
+    # unreadable contract. We do NOT fall back to hardcoded criteria; the
+    # whole point of a per-mission checklist is mission-specific evidence.
+    criteria_list = _load_criteria(domain)
+    if not criteria_list:
+        result = AuditResult(
+            overall="BLOCKED",
+            phase="mechanical",
+            blocking_summary=(
+                "checklist.md missing or unparseable — no acceptance criteria "
+                "to verify against. This is a launcher bug (compile_checklist "
+                "should have written at least one criterion)."
+            ),
+            mechanical_failures=[
+                "workspace/checklist.md missing or contains 0 parseable criteria"
+            ],
+        )
+        _write_report(domain, round_num, result, mark_done_reason)
+        logger.warning(
+            f"Harvest audit round {round_num}: BLOCKED — 0 criteria loaded"
+        )
+        return result
+
     # Phase 2
     criteria, overall, blocking_summary, raw = await _run_llm_audit(
-        llm, domain, requirement, mark_done_reason,
+        llm, domain, requirement, mark_done_reason, criteria_list,
     )
     result = AuditResult(
         overall=overall,

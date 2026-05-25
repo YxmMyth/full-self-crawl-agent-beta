@@ -46,6 +46,7 @@ from src.agent.tools import (
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
+from src.harvest.checklist import compile_checklist
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
 from src.runtime.human_assist import TkinterPopupGateway
@@ -267,20 +268,62 @@ async def run_harvest(
 
     browser_manager = BrowserManager(domain=domain)
     browser_manager.gateway = TkinterPopupGateway()
-    ctx = await browser_manager.launch()
-    logger.info("Browser launched, human_assist gateway = TkinterPopup")
+    # Harvest defaults to headless. Reasons:
+    # - Recon already established cookies/session (persistent profile),
+    #   harvest does not need login flow.
+    # - human_assist popup is OS-level Tkinter (always-on-top dialog),
+    #   independent of browser headedness — so popup still works.
+    # - Headed Camoufox launch in long-running sessions hits a Camoufox/
+    #   Playwright handshake stall (id:1 Browser.enable never receives ack
+    #   when WebGL force-enabled hits stuck GPU context state — observed
+    #   2026-05-25 svg run, reproduced minimal). Headless avoids GL init.
+    # If agent needs headed mid-mission (Cloudflare interactive challenge,
+    # visual debug), it can call browser_reset(headed=True) explicitly.
+    ctx = await browser_manager.launch(headed=False)
+    logger.info("Browser launched (headless), human_assist gateway = TkinterPopup")
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
 
-    # No pre-compiled checklist. mark_done runs the harvest audit (single
-    # LLM call seeing actual disk state) when called. Previously we compiled
-    # bash checks here, but that proved to fortune-tell — the LLM at compile
-    # time didn't know what data harvest would produce, so checks were
-    # frequently over-narrow (svg run: `file --mime-type | grep text/plain`
-    # rejected `application/javascript`). LLM late-bind audit avoids this.
+    # Compile checklist as DESCRIPTIONS ONLY (no bash check field).
+    # The audit (src/harvest/audit.py) reads these descriptions at
+    # mark_done time and asks an LLM to evaluate each against actual
+    # on-disk evidence. This combines:
+    #   - mission-specific criteria (LLM compiles per-mission, references
+    #     this catalog/sample by name; avoids generic hardcoded H1-H6)
+    #   - late-bound verification (no bash fortune-telling — the famous
+    #     svg-run `file --mime-type | grep text/plain` bug can't recur
+    #     since there are no bash checks frozen at compile time)
+    #   - tamper resistance (hash-pinned below; agent can't rewrite the
+    #     contract to make satisficing easy)
     workspace = run_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    samples_dir = run_dir / "samples"
+    catalog_dir = run_dir / "catalog"
+    checklist_path = workspace / "checklist.md"
+    _, procedural_model = await db.load_both_models(domain)
+    ok = await compile_checklist(
+        llm, requirement, samples_dir, checklist_path,
+        catalog_dir=catalog_dir,
+        procedural_model=procedural_model,
+    )
+    logger.info(
+        f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: "
+        f"{checklist_path}"
+    )
+
+    # Hash-pin the compiled checklist. mark_done verifies the on-disk file
+    # against this sha256 before invoking the audit — any agent edit (even
+    # one byte) fails the mission. See 2026-05-25 svg run for the bypass
+    # this defends against (agent rewrote section headers so the parser
+    # found 0 criteria, then auto-PASS fallback fired). The current
+    # design rejects parser-0-criteria too, but the hash is defense in
+    # depth.
+    import hashlib
+    ctx._checklist_sha256 = hashlib.sha256(
+        checklist_path.read_bytes()
+    ).hexdigest()
+    logger.info(f"Checklist sha256: {ctx._checklist_sha256[:16]}...")
 
     # Attach deps for mark_done (it reads these off ctx to call the audit)
     ctx._llm = llm
