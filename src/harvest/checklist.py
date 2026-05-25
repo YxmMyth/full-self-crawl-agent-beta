@@ -85,12 +85,35 @@ def parse_checklist(text: str) -> list[Criterion]:
         if current_id is None:
             return
         crit_text = current_fields.get("criterion", "").strip()
-        check_text = current_fields.get("check", "").strip()
+        raw_check_text = current_fields.get("check", "").strip()
         # Extract bash command from backticks if present
-        m = _BACKTICK_RE.search(check_text)
+        m = _BACKTICK_RE.search(raw_check_text)
         if m:
             check_text = m.group(1)
-        if crit_text and check_text:
+        else:
+            check_text = raw_check_text
+        # Detect truncated multi-line check: the FIELD_RE captures only one
+        # physical line. If LLM wrote a multi-line `python -c "..."` check,
+        # we get the first fragment like `` `python -c " `` with one open
+        # backtick and no close → BACKTICK_RE.search fails → check_text still
+        # has unbalanced backticks. Bash would then hit "unexpected EOF".
+        # (svg harvest 2026-05-25 reproduced this pattern.)
+        # The smoking gun: an odd count of unescaped backticks in the
+        # extracted command means truncation. Surfacing this as a warning +
+        # skipping the criterion is safer than running half a command and
+        # FAILing a perfectly correct check.
+        truncated = check_text.count("`") % 2 != 0
+        if truncated:
+            logger.warning(
+                f"Criterion {current_id} ({current_name}): check command "
+                f"truncated (unmatched backticks — likely a multi-line "
+                f"`python -c \"...\"` that the parser only captured the first "
+                f"line of). Multi-line checks are not supported — use "
+                f"semicolons in a single line, or write a script file and "
+                f"call `python script.py`. SKIPPING this criterion. "
+                f"Raw text: {raw_check_text[:120]!r}"
+            )
+        elif crit_text and check_text:
             criteria.append(Criterion(
                 id=current_id,
                 name=current_name,
@@ -218,6 +241,16 @@ model, NOT from a number written in the requirement.
   not have shipped without a universe.
 
 Rules for check commands:
+- **STRICT SINGLE-LINE**: each `check` value must be ONE line of bash. The
+  parser only reads the first line of the `**check**:` field — if your
+  command spans multiple lines (e.g. heredoc, multi-line `python -c "..."`),
+  the parser captures only the first fragment, bash hits unexpected EOF,
+  and the check FAILs even when the data is correct. This is a real bug
+  reproduced on 2026-05-25.
+  - For Python: use semicolons, not newlines. Example:
+    `python -c "import json,os,sys; d=json.load(open('../catalog/x.json')); ids={r['id'] for p in d for r in p['records']}; ...; sys.exit(0 if len(ids)==89 else 1)"`
+  - Need a longer script? Write it to a file (e.g. `verify.py`) and call
+    `python verify.py` in the check.
 - Each check is a bash one-liner. Workspace cwd = harvest workspace dir.
 - Output data lives under the workspace (agent picks subdir, often `data/`).
 - Read-only reference samples are at `../samples/` (recon's output).
