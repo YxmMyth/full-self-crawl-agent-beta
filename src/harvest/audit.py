@@ -338,23 +338,99 @@ def _gather_context(domain: str) -> str:
     else:
         sections.append("  (directory missing)")
 
-    # workspace/ top-level (scripts, state, error logs)
-    sections.append("\n### workspace/ top-level (scripts, state, error logs)")
-    if workspace.is_dir():
-        wfiles = sorted(
-            p for p in workspace.iterdir()
-            if p.is_file() and not p.name.startswith(".")
-        )
-        for p in wfiles[:50]:
-            try:
-                size = p.stat().st_size
-            except Exception:
-                size = -1
-            sections.append(f"  - {p.name} ({size} bytes)")
-        if len(wfiles) > 50:
-            sections.append(f"  ... ({len(wfiles) - 50} more files)")
-    else:
+    # workspace/ top-level — grouped by purpose to defend against the cap-50
+    # alphabetical truncation bug (2026-05-25 svg run: 287 files in
+    # workspace, *_full.json sorted ahead of save_pen.py alphabetically,
+    # cap-50 hid all scripts → auditor reported false "scripts missing").
+    sections.append("\n### workspace/ top-level — scripts, state, deliverables")
+    if not workspace.is_dir():
         sections.append("  (workspace dir missing)")
+        return "\n".join(sections)
+
+    all_top = [
+        p for p in workspace.iterdir()
+        if not p.name.startswith(".") and p.name not in ("__pycache__",)
+    ]
+    files = [p for p in all_top if p.is_file()]
+    subdirs = [p for p in all_top if p.is_dir() and p.name != "data"]
+
+    # Bucket files by purpose. Scripts + reports + state are uncapped (they
+    # are reproducibility-critical and small). Intermediate / debris are
+    # summarized as a count + total size, not individually listed.
+    scripts: list[Path] = []
+    state_reports: list[Path] = []
+    intermediate: list[Path] = []
+    other: list[Path] = []
+    for p in files:
+        name = p.name.lower()
+        ext = p.suffix.lower()
+        if ext in (".py", ".sh", ".js"):
+            scripts.append(p)
+        elif ext in (".md",) or name in (
+            "state.json", "progress.md", "errors.json", "errors.txt",
+            "errors.log", "harvest_errors.txt", "readme.md",
+        ):
+            state_reports.append(p)
+        elif (
+            name.startswith("_")  # convention: leading underscore = scratch
+            or name.endswith("_full.json")
+            or name.endswith("_extracted.json")
+            or name.endswith("_compiled.txt")
+            or name.endswith("_compiled.json")
+            or (name.startswith("batch_") and name.endswith(".json"))
+            or (name.startswith("bash_") and name.endswith(".txt"))
+            or ext == ".pyc"
+        ):
+            intermediate.append(p)
+        else:
+            other.append(p)
+
+    def _format_file(p: Path) -> str:
+        try:
+            return f"  - {p.name} ({p.stat().st_size} bytes)"
+        except Exception:
+            return f"  - {p.name} (size unknown)"
+
+    # Scripts uncapped (reproducibility — H5 critical)
+    if scripts:
+        sections.append(f"Scripts ({len(scripts)}):")
+        for p in sorted(scripts):
+            sections.append(_format_file(p))
+    else:
+        sections.append("Scripts: (none) — H5 reproducibility likely FAIL")
+
+    # State / reports / error logs uncapped
+    if state_reports:
+        sections.append(f"\nState / reports / error logs ({len(state_reports)}):")
+        for p in sorted(state_reports):
+            sections.append(_format_file(p))
+    else:
+        sections.append("\nState / reports / error logs: (none)")
+
+    # Other files capped at 30 (catches truly unique deliverables)
+    if other:
+        sections.append(f"\nOther top-level files ({len(other)}):")
+        for p in sorted(other)[:30]:
+            sections.append(_format_file(p))
+        if len(other) > 30:
+            sections.append(f"  ... ({len(other) - 30} more files)")
+
+    # Intermediate / debris summarized only (don't pollute LLM context)
+    if intermediate:
+        total_bytes = sum(p.stat().st_size for p in intermediate)
+        sections.append(
+            f"\nIntermediate / scratch files ({len(intermediate)} files, "
+            f"{total_bytes} bytes total): batch JSON, debug dumps, "
+            "compiled fragments. Not listed individually — agent's "
+            "throwaway working files."
+        )
+
+    # Subdirs (non-data) listed
+    if subdirs:
+        sections.append("\nSubdirectories (non-data):")
+        for d in sorted(subdirs):
+            inner = sum(1 for x in d.iterdir() if x.is_file()) if d.is_dir() else 0
+            sections.append(f"  - {d.name}/ ({inner} files)")
 
     return "\n".join(sections)
 

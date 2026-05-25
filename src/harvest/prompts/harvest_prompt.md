@@ -70,15 +70,29 @@ Then write a reason like: "Harvested 89/89 catalog pens to data/ as `{id}_html.t
 - `request_human_assist(reason)` — for true human-only gates only (login form, CAPTCHA, 2FA code, email verification, device verification). NOT for "I'm stuck exploring" or "I haven't found X yet". Be specific in `reason` so the operator knows what to do. After it returns, call `browse()` to re-observe — the tool does NOT confirm "login successful"; you judge from the new page state.
 - `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) single LLM call that loads the criteria from `workspace/checklist.md` and evaluates each against actual disk state. PASS → done. BLOCKED → per-criterion verdict with evidence + actionable gaps, you fix and retry. Your `reason` is one of the inputs — make it concrete (counts, scope, scripts) and the auditor cross-references against the disk.
 
-## Workspace layout
+## Workspace layout (FOLLOW THIS — auditor uses it to find your work)
 
-CWD when you run `bash` = `artifacts/{domain}/runs/{run_id}/workspace/`. Internal layout is your call. Reasonable defaults if you have no preference:
+CWD when you run `bash` = `artifacts/{domain}/runs/{run_id}/workspace/`. The auditor at mark_done time lists the workspace TOP-LEVEL to find your scripts and reports. If you bury `crawl.py` under 200 intermediate JSON files, the listing gets truncated and the auditor can't see your deliverables — you'll FAIL reproducibility criteria even with perfect data.
 
-- `crawl.py` — main crawler script
-- `data/` — output records (JSONL preferred for record streams; CSV for tabular)
-- `state.json` — resume state for long runs
-- `PROGRESS.md` — running notes (optional, helpful for >1-hour runs to anchor yourself)
-- `errors.log` — captured exceptions / failed URLs from runs
+**Required top-level layout**:
+
+```
+workspace/
+├── crawl.py                    ← main crawler script (REQUIRED for reproducibility)
+├── data/                       ← output records (the actual deliverable)
+├── state.json                  ← resume state (optional, for long runs)
+├── PROGRESS.md                 ← running notes (optional)
+├── errors.json or errors.txt   ← any failed/skipped entities (REQUIRED if any are missing)
+└── _scratch/                   ← EVERYTHING ELSE goes here
+    ├── *_full.json             ← batch extraction intermediate
+    ├── *_compiled.txt          ← processing intermediate
+    ├── *_extracted.json        ← debug dumps
+    ├── check_*.py              ← throwaway analysis scripts
+    ├── _debug.txt              ← scratch debug files
+    └── ...                     ← anything you wouldn't ship to a customer
+```
+
+**The discipline**: when you `bash python crawl.py` and it writes 89 intermediate JSON files, write them to `_scratch/` not top-level. When you write `check_c1.py` to test one criterion, put it in `_scratch/`. Top-level should stay clean — 5-10 files max, all things the next operator would want to see.
 
 `../samples/` is recon's read-only reference. **Never write your output to `../samples/`** — that corrupts the shape contract. Your output goes under `./` (workspace).
 
