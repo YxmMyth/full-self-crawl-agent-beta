@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -80,8 +81,16 @@ async def run_explore(domain: str, requirement: str) -> None:
     # any subsequent browser_reset(). Tkinter desktop popup is the default —
     # always-on-top regardless of which app the user is currently looking at.
     browser_manager.gateway = TkinterPopupGateway()
-    ctx = await browser_manager.launch()
-    logger.info("Browser launched, human_assist gateway = TkinterPopup")
+    # Default headed (recon's human_assist relies on visible window). Override
+    # via RECON_HEADLESS=1 when headed Camoufox launch hangs (Juggler/
+    # removeProgressListener bug observed on Windows + Python 3.14 + recent
+    # Camoufox — see docs/openslr_run_observations.md 2026-05-26).
+    recon_headless = os.getenv("RECON_HEADLESS", "0") == "1"
+    ctx = await browser_manager.launch(headed=not recon_headless)
+    logger.info(
+        f"Browser launched (headless={recon_headless}), "
+        f"human_assist gateway = TkinterPopup"
+    )
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
