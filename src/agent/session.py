@@ -317,6 +317,7 @@ class AgentSession:
         self.round = 0  # API round counter (for microcompact grouping)
         self.outcome: str = OUTCOME_NATURAL
         self.consecutive_errors = 0
+        self._nudge_count = 0  # harvest mode: times nudged to mark_done
         self.tool_trajectory: list[str] = []
 
         # Observability
@@ -411,8 +412,45 @@ class AgentSession:
             assistant_msg = self._build_assistant_msg(response)
             self.messages.append(assistant_msg)
 
-            # No tool calls → natural stop
+            # No tool calls → natural stop, BUT in harvest mode (where mark_done
+            # is the contract), if mission_done isn't signaled, this is a
+            # premature exit (LLM wrote a "I'm done" text instead of calling
+            # mark_done). Nudge to continue, up to N times. Observed 2026-05-28
+            # on xmind harvest — agent fixed harvest.py after BLOCKED but
+            # didn't re-call mark_done, session natural-stopped with BLOCKED
+            # verdict frozen at audit round 2.
             if not response.tool_calls:
+                harvest_mode = "mark_done" in self.registry.names()
+                mission_done = getattr(self.ctx, "_mission_done", False)
+                if (
+                    harvest_mode
+                    and not mission_done
+                    and self._nudge_count < 3
+                ):
+                    self._nudge_count += 1
+                    logger.info(
+                        f"Harvest natural_stop intercepted "
+                        f"(nudge {self._nudge_count}/3) — mission_done is False, "
+                        f"injecting mark_done reminder"
+                    )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP — you cannot end this session by replying with "
+                            "text. The harvest contract requires you to call "
+                            "mark_done(reason) until it returns PASS, or call "
+                            "mark_done(status='blocked', reason=...) as the "
+                            "explicit escape hatch if you genuinely cannot make "
+                            "further progress.\n\n"
+                            "If you just fixed a problem flagged by a prior "
+                            "BLOCKED verdict, call mark_done again now with "
+                            "concrete evidence of the fix. If you're truly "
+                            "stuck, call mark_done with status='blocked' so the "
+                            "session ends cleanly with an outcome. Either way: "
+                            "make a tool call."
+                        ),
+                    })
+                    continue
                 self.outcome = OUTCOME_NATURAL
                 logger.info("Agent stopped naturally (no tool calls)")
                 break
