@@ -134,11 +134,27 @@ class RecordingAgent:
         self._consumer_task = asyncio.create_task(self._consume_loop())
         logger.info("Recording Agent started", extra={"domain": self.domain})
 
-    async def stop(self) -> None:
-        """Stop the consumer loop."""
+    async def stop(self, timeout: float = 120.0) -> None:
+        """Stop the consumer loop. Times out after `timeout` seconds.
+
+        Without the timeout, a hung _process_increment (e.g. LLM SDK retry
+        storm on a malformed message in history) would block shutdown
+        forever — observed 2026-05-28 on 66rpg recon→harvest transition.
+        """
         if self._consumer_task and not self._consumer_task.done():
             await self.queue.put(None)  # sentinel
-            await self._consumer_task
+            try:
+                await asyncio.wait_for(self._consumer_task, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Recording Agent stop timed out after {timeout}s — "
+                    "force-cancelling consumer task. Pending increments lost."
+                )
+                self._consumer_task.cancel()
+                try:
+                    await self._consumer_task
+                except (asyncio.CancelledError, Exception):
+                    pass
         logger.info("Recording Agent stopped")
 
     async def push_increment(

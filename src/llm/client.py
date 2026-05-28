@@ -96,6 +96,14 @@ class LLMResponse:
             ]
         # Always emit reasoning_content — required-non-empty by thinking-mode APIs.
         msg["reasoning_content"] = self.reasoning if self.reasoning else "(no thinking captured)"
+        # Providers (e.g. deepseek) reject assistant messages with neither
+        # content nor tool_calls — "Invalid assistant message: content or
+        # tool_calls must be set". Happens when thinking-mode model produces
+        # only reasoning. Inject placeholder content so the message is legal
+        # in history. Confirmed 2026-05-28 — 66rpg recon→harvest hang was
+        # recording_agent.stop() looping over malformed messages.
+        if "content" not in msg and "tool_calls" not in msg:
+            msg["content"] = "(empty turn)"
         return msg
 
 
