@@ -159,6 +159,20 @@ class BrowserManager:
 
         # Priority 3: Local Camoufox with persistent context (default)
         if page is None:
+            # Firefox writes parent.lock at launch and deletes it on graceful
+            # exit. Our close() uses psutil SIGKILL (psutil for owned-PID
+            # tracking, 5ad5a2f), which leaves parent.lock orphaned. Next
+            # launch then waits for the lock to release — Playwright times
+            # out after 180s with the symptom "Juggler removeProgressListener
+            # NS_ERROR_FAILURE". Confirmed 2026-05-28 by deleting parent.lock
+            # before launch — headed boots in ~34s. Cheap defensive sweep:
+            lock = self.profile_dir / "parent.lock"
+            if lock.exists():
+                try:
+                    lock.unlink()
+                    logger.info(f"Removed stale parent.lock from {self.profile_dir}")
+                except OSError as e:
+                    logger.warning(f"Could not remove parent.lock: {e}")
             page, pw_context = await self._launch_camoufox()
             logger.info(
                 f"Launched Camoufox (headed={self._headed}, "
