@@ -230,14 +230,17 @@ async def run_research(
         if response is None:
             break
 
-        # response.text handles the content/reasoning_content split
-        # (thinking-mode models emit narration in reasoning_content during
-        # tool-using rounds — see LLMResponse.text).
-        if response.text:
-            findings_text = response.text
         messages.append(response.to_assistant_message())
 
+        # Only the no-tool-call round produces real findings. During tool-using
+        # rounds, response.text is just reasoning_content narration ("let me
+        # check next..."), NOT a synthesized report. Capturing it here would
+        # (a) produce a garbage final report, and (b) bypass the forced
+        # synthesis fallback below (which only fires when findings_text is
+        # empty). Confirmed 2026-05-28 — openslr research report was a single
+        # narration sentence due to this bug.
         if not response.tool_calls:
+            findings_text = response.text
             break
 
         # Execute tools
