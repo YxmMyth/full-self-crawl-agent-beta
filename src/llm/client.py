@@ -235,7 +235,7 @@ class LLMClient:
     ) -> str | None:
         """Vision model call for browse visual mode.
 
-        Uses VISION_LLM_MODEL (kimi-k2.5) to describe a screenshot.
+        Uses VISION_LLM_MODEL (default Doubao-Seed-2.0-pro) to describe a screenshot.
         """
         messages = [
             {
