@@ -200,13 +200,64 @@ For any page you're extracting from, prefer:
 browse() Data Signals section shows which paths exist on the current page. \
 Follow the signals.
 
+## Universe Enumeration (harvest hand-off)
+
+Reconnaissance is the upstream of harvest. Beyond understanding the site, \
+you produce the **universe** — the enumerable list of every entity the \
+harvest stage will need to fetch. Without this, harvest doesn't know what \
+"all of it" means and can't verify completion.
+
+WHAT THE UNIVERSE IS.
+The universe is the catalog of all candidates matching the requirement's \
+scope. Examples:
+  • Mission "all pens tagged webgl on codepen" → universe = list of every \
+    pen ID returned by the webgl tag listing (cursor-paginated to the end).
+  • Mission "all articles in /docs/" → universe = list of every doc URL \
+    from the sitemap or the docs index.
+  • Mission "every product in category X" → universe = list of every \
+    product slug from the category listing across all pages.
+
+WHERE THE UNIVERSE LIVES.
+Save the universe under `catalog/` with `save_as` + `kind='catalog'`. \
+Free schema — JSON / JSONL / CSV / TXT, whatever fits the site. Must \
+contain a per-entity unique identifier (ID, slug, URL — your call). One \
+file containing the full list is ideal; multiple files (e.g. per-category \
+listings) is fine as long as the procedural model documents how to \
+combine them.
+
+HOW MUCH TO ENUMERATE.
+Default: **enumerate to completion** during recon — even if it means \
+paginating to the end. Harvest depends on this being complete; a partial \
+catalog leaks into harvest as silent under-collection.
+
+If the universe is truly unbounded or unreasonably large (infinite \
+scrolling feed, search returning millions, no exhaustion mechanism), do \
+NOT silently truncate. Instead:
+  • Save what's reasonable to `catalog/` (e.g. first N pages)
+  • Document in the procedural model: **"Universe unbounded — gate \
+    required."** Include WHY (no total / no exhaustion API / >10K entries) \
+    and HOW harvest would enumerate (the paging method).
+The strategy report surfaces this so a human can decide on a narrower \
+scope before harvest starts.
+
+IN THE PROCEDURAL MODEL.
+Write a short section near the top:
+  • Universe size: N (or "unbounded — gate required")
+  • Universe location: catalog/<file>
+  • Enumeration method: how to walk the universe (cursor field / page \
+    range / sitemap parse / API endpoint with params)
+
 ## Boundaries
 
 - Every site is different. Don't assume URL patterns or data schemas.
 - 'Sample' means REAL DATA ON DISK — image bytes, file content, full text — \
 **not** metadata records or URL strings. Listing JSON is NOT a sample.
-- Mission is done when (a) briefing objectives are addressed AND \
-(b) you have Layer-3 samples for every data type discovered."""
+- Catalog ≠ sample. The catalog defines the universe (what to harvest), \
+samples prove the extraction method works. Both are required.
+- Mission is done when (a) briefing objectives are addressed, (b) you \
+have Layer-3 samples for every data type discovered, AND (c) the \
+universe is enumerated to `catalog/` (or explicitly marked unbounded \
+with enumeration method documented)."""
 
 
 # ── Microcompact config ──────────────────────────────────
@@ -222,6 +273,7 @@ OUTCOME_NATURAL = "natural_stop"
 OUTCOME_CONTEXT = "context_exhausted"
 OUTCOME_ERRORS = "consecutive_errors"
 OUTCOME_SAFETY = "safety_net"
+OUTCOME_DONE = "mission_done"  # set by mark_done tool on Verification PASS
 
 
 class AgentSession:
@@ -238,6 +290,7 @@ class AgentSession:
         registry: ToolRegistry,
         browser_manager: Any = None,
         recording_agent: Any = None,
+        system_prompt: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.run_id = run_id
@@ -255,7 +308,7 @@ class AgentSession:
 
         # Message array — the agent's working memory
         self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": briefing},
         ]
 
@@ -264,6 +317,7 @@ class AgentSession:
         self.round = 0  # API round counter (for microcompact grouping)
         self.outcome: str = OUTCOME_NATURAL
         self.consecutive_errors = 0
+        self._nudge_count = 0  # harvest mode: times nudged to mark_done
         self.tool_trajectory: list[str] = []
 
         # Observability
@@ -358,8 +412,45 @@ class AgentSession:
             assistant_msg = self._build_assistant_msg(response)
             self.messages.append(assistant_msg)
 
-            # No tool calls → natural stop
+            # No tool calls → natural stop, BUT in harvest mode (where mark_done
+            # is the contract), if mission_done isn't signaled, this is a
+            # premature exit (LLM wrote a "I'm done" text instead of calling
+            # mark_done). Nudge to continue, up to N times. Observed 2026-05-28
+            # on xmind harvest — agent fixed harvest.py after BLOCKED but
+            # didn't re-call mark_done, session natural-stopped with BLOCKED
+            # verdict frozen at audit round 2.
             if not response.tool_calls:
+                harvest_mode = "mark_done" in self.registry.names()
+                mission_done = getattr(self.ctx, "_mission_done", False)
+                if (
+                    harvest_mode
+                    and not mission_done
+                    and self._nudge_count < 3
+                ):
+                    self._nudge_count += 1
+                    logger.info(
+                        f"Harvest natural_stop intercepted "
+                        f"(nudge {self._nudge_count}/3) — mission_done is False, "
+                        f"injecting mark_done reminder"
+                    )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP — you cannot end this session by replying with "
+                            "text. The harvest contract requires you to call "
+                            "mark_done(reason) until it returns PASS, or call "
+                            "mark_done(status='blocked', reason=...) as the "
+                            "explicit escape hatch if you genuinely cannot make "
+                            "further progress.\n\n"
+                            "If you just fixed a problem flagged by a prior "
+                            "BLOCKED verdict, call mark_done again now with "
+                            "concrete evidence of the fix. If you're truly "
+                            "stuck, call mark_done with status='blocked' so the "
+                            "session ends cleanly with an outcome. Either way: "
+                            "make a tool call."
+                        ),
+                    })
+                    continue
                 self.outcome = OUTCOME_NATURAL
                 logger.info("Agent stopped naturally (no tool calls)")
                 break
@@ -391,6 +482,19 @@ class AgentSession:
 
             # Push transcript increment to Recording Agent (non-blocking)
             await self._push_to_recording(response)
+
+            # Mission-complete signal from mark_done (harvest mode)
+            if getattr(self.ctx, "_mission_done", False):
+                self.outcome = OUTCOME_DONE
+                logger.info("Session ended: mission_done signaled by mark_done")
+                break
+
+            # Safety-net signal (set by external watchdog: wall clock, tool cap, etc.)
+            if getattr(self.ctx, "_safety_stop", False):
+                self.outcome = OUTCOME_SAFETY
+                reason = getattr(self.ctx, "_safety_reason", "unspecified")
+                logger.warning(f"Session ended: safety_stop - {reason}")
+                break
 
             # Check stop conditions
             if self.consecutive_errors >= 5:

@@ -93,6 +93,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["url"],
+    "additionalProperties": False,
 }
 
 _KIND_DIRS = {"sample": "samples", "catalog": "catalog", "workspace": "workspace"}

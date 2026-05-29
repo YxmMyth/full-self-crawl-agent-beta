@@ -1,54 +1,63 @@
-# Full-Self-Crawl-Agent
+# Full-Self-Crawl Agent
 
-LLM-driven web reconnaissance agent. Give it a domain and a natural-language
-requirement; it autonomously explores the site, discovers data sources,
-collects samples, and builds a structured Model of how the site works.
+LLM-driven web reconnaissance + harvest agent. Give it a domain and a
+natural-language data requirement; it autonomously explores the site,
+maps its structure into a World Model, writes a reusable harvest script,
+and produces the actual dataset.
 
 ```bash
-python src/main.py "ui8.net" "采集 5 个 free UI Kit 完整文件"
+python -m src.main auto openslr.org \
+  "采集 OpenSLR 上的小语种 (low-resource, 非英语/中文/印欧大语种) 语音数据集,
+   含音频文件 + 转写 + 元数据 (SLR 编号、语种、时长、许可证、采样率)。" \
+  --no-gate
 ```
 
-No URL patterns, no XPath selectors, no schema definitions — you describe
-*what you want* in plain language, and the agent figures out the *how*.
+No URL patterns, no XPath selectors, no schema files — describe *what
+you want* in plain language; the agent figures out the *how*, validates
+its own output against a per-mission acceptance contract, and hands you
+both a sample dataset and a runnable script.
 
 ---
 
 ## What this is (and isn't)
 
 **It is:**
-- A multi-layer agent system: a Planner directs Execution Agents that
-  autonomously navigate browsers + run scripts + call APIs, while a
-  Recording Agent maintains a structured World Model in the background
-  and a Verification Subagent gates "done" claims.
-- Designed for **understanding + sampling**, not exhaustive extraction.
-  The output is a few representative samples + a Model that documents
-  how to get the rest.
-- Headed-browser-first: agents share a real Camoufox window with you
-  so you can see what they're doing and step in (login, CAPTCHA,
-  manual verification) when they ask.
+
+- A two-stage agent system: a **Recon** stage explores the site and
+  builds a structured World Model + catalog + samples; a **Harvest**
+  stage takes that handoff and produces the actual at-scale dataset,
+  with an LLM auditor gating "done" claims against the on-disk evidence.
+- **Domain-agnostic** by design — no hardcoded URL patterns, site
+  classifications, or data schemas. Every operating assumption is
+  discovered at runtime.
+- **Mission-specific contracts** — for each run, a checklist is
+  compiled from the requirement + catalog at harvest start, hash-pinned
+  to prevent the agent from cheating, and used as the per-criterion
+  acceptance contract by the audit.
 
 **It isn't:**
-- A scraper builder — there's no rule-config layer to write.
-- A headless server-side worker — the design assumes you (or a person)
-  is around to handle login walls. The `request_human_assist` tool pops
-  a desktop dialog when the agent needs you.
-- Plug-and-play in CI — see "Why no Docker" below.
+
+- A scraper builder — there's no rule-config layer to author.
+- A black-box service — everything the agent produces (catalog, samples,
+  transcripts, scripts, audit verdicts) is on disk for human inspection.
+- A magic site-bypass tool — for login walls, CAPTCHAs, and aggressive
+  WAFs, it knows when to ask for help via desktop popup (`request_human_assist`)
+  rather than silently fail.
 
 ---
 
-## Setup
+## Quick Start
 
 ### Prerequisites
 
 - **Python 3.10+**
-- **PostgreSQL 16** (local install or any reachable instance — Supabase
-  / Neon / cloud PG all work). The agent stores the World Model + run
-  metadata here.
-- **Camoufox** (a Firefox-based stealth browser, installed via pip below
-  — also auto-downloads a ~250MB browser binary on first use).
-- A desktop environment (the agent shows a real browser window and uses
-  Tkinter for human-assist popups; pure-headless servers are not the
-  target environment).
+- **PostgreSQL 16** (local install or any reachable instance — Neon /
+  Supabase / cloud PG all work; the agent stores the World Model + run
+  metadata here).
+- **Camoufox** — a Firefox-based stealth browser, installed via pip
+  below. Auto-downloads a ~250MB binary on first use.
+- An OpenAI-compatible LLM endpoint (DeepSeek, MiMo, Qwen, GLM, GPT,
+  Claude — anything that speaks `/v1/chat/completions`).
 
 ### Install
 
@@ -63,52 +72,132 @@ pip install -r requirements.txt
 camoufox fetch
 
 # 3. Database
-#    (a) make sure PostgreSQL is running and accessible
-#    (b) create the database and load the schema:
 psql -c "CREATE DATABASE recon_agent;"
 psql recon_agent < src/world_model/schema.sql
 
 # 4. Configuration
 cp .env.example .env
-#    then edit .env with your LLM credentials
-#    (see "Configuration" section below)
+# then fill in LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, DATABASE_URL
 ```
 
-### Configuration
+### Run
 
-Copy `.env.example` to `.env`. Required:
+```bash
+# Recon + Harvest in one shot, no human gate between stages:
+python -m src.main auto <domain> "<requirement>" --no-gate
 
-| Variable | Description |
-|----------|-------------|
-| `LLM_API_KEY` | Your OpenAI-compatible API key |
-| `LLM_BASE_URL` | Endpoint, e.g. `https://api.deepseek.com/v1` |
-| `LLM_MODEL` | Model name, e.g. `deepseek-chat` or `deepseek-v4-pro` |
-| `DATABASE_URL` | PostgreSQL connection string |
-
-Optional ones documented in `.env.example`.
+# Or run stages separately:
+python -m src.main explore <domain> "<requirement>"            # recon only
+python -m src.main harvest <domain> --from-run <run_id>        # harvest only
+```
 
 ---
 
-## Run
+## Architecture
 
-```bash
-python src/main.py "<domain>" "<natural-language requirement>"
+```
+┌─────────────────────── Recon Stage ──────────────────────┐
+│                                                          │
+│   ReconPlanner (tool-use agent, 5 tools)                 │
+│     ├─ spawn_execution ──► Execution Agent Session       │
+│     │                        ├─ 14 tools (browse, fetch, │
+│     │                        │   bash, click, ...)       │
+│     │                        └─ pushes increments ────►  │
+│     │                                       Recording   │
+│     │                                       Agent ────► │
+│     │                                       (singleton) │
+│     │                                       maintains   │
+│     │                                       Observations│
+│     ├─ spawn_research  ──► Research Subagent             │
+│     │                        (web_search, web_fetch,     │
+│     │                         bash, think)               │
+│     ├─ read_model      ──► load Semantic + Procedural    │
+│     ├─ think           ──► no side effects               │
+│     └─ mark_done       ──► triggers Recon Audit          │
+│                            (6 criteria, LLM single-call) │
+│                                                          │
+│   on PASS ────────────────────────────────────────────►  │
+└──────────────────────────────────────────────────────────┘
+                              │ catalog/, samples/, WM
+                              ▼
+              ┌─── optional human gate ───┐
+              │  edit requirement.txt or  │
+              │  abort before harvest     │
+              └────────────┬──────────────┘
+                           ▼
+┌────────────────── Harvest Stage ─────────────────────────┐
+│                                                          │
+│   Launcher compiles checklist.md from requirement +      │
+│   catalog + samples + procedural model (hash-pinned).    │
+│                                                          │
+│   Harvest Agent Session                                  │
+│     ├─ 14 recon tools + apply_patch + mark_done          │
+│     ├─ Reads checklist before doing anything             │
+│     ├─ Writes data/ + crawler script + state.json        │
+│     └─ Calls mark_done → Harvest Audit                   │
+│                            (loads checklist, evaluates   │
+│                             each criterion against disk) │
+│                                                          │
+│   PASS ────────────────► mission done                    │
+│   BLOCKED ──────────────► agent iterates, re-mark_done   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-Examples:
+**Data architecture (3 layers, immutability rules):**
+
+| Layer | Source of Truth | Mutability |
+|-------|----------------|------------|
+| **Transcripts** | Each session's full LLM dialogue (JSONL) | Append-only, never edited |
+| **Observations** | Recording Agent's structured per-location notes | CRUD by Recording Agent only |
+| **Models** (Semantic + Procedural) | LLM-distilled understanding of the site | Full rewrite per session by maintain_model |
+
+See `docs/WorldModel设计.md` for the rationale.
+
+---
+
+## Real-World Examples
+
+### 1. OpenSLR — low-resource language speech data
 
 ```bash
-python src/main.py "ui8.net" \
-  "采集 5 个 free UI Kit 完整文件"
-
-python src/main.py "codepen.io" \
-  "找出 codepen.io 上 webgl 相关的优质代码,采集 5 个样本"
+python -m src.main auto openslr.org \
+  "采集 OpenSLR 站上小语种(non-English/Chinese/major-IE) 语音数据集,
+   含音频文件 + 转写 + 元数据 (SLR 编号、语种、时长、许可证、采样率)。" \
+  --no-gate
 ```
 
-The agent launches a Camoufox window. As it runs, it may pop up
-desktop dialogs asking you to handle login / CAPTCHA / 2FA — these
-are the only times it needs you. You can scan a QR or type credentials,
-then the agent observes the new page state and continues.
+Recon discovers `/resources.php` catalog + `info.txt` metadata format,
+identifies the `dlcdn1.cgyouxi.com` mirror as more reliable than the
+main host, and writes `catalog/low_resource_candidates.json` with 61
+filtered datasets. Harvest runs a resumable script with retry +
+streaming download + post-hoc verification.
+
+### 2. 66rpg.com (Orange Light) — text-game asset bundles
+
+```bash
+python -m src.main auto 66rpg.com \
+  "采集 66rpg.com 文字游戏 3 个,每个含完整剧本资源:
+   剧情文本 + 立绘 + BGM + CG。" \
+  --no-gate
+```
+
+The agent independently reverses the H5 player's CDN protocol via
+JavaScript inspection — `/web/{guid}/{ver}/Map.bin` for the resource
+manifest, `/shareres/{md5[:2]}/{md5}` for individual assets — bypassing
+the WebGL-rendered front-end entirely.
+
+### 3. xmind.com Gallery — public mind maps
+
+```bash
+python -m src.main auto xmind.com \
+  "采集 xmind.com gallery 公开思维导图 30 张,
+   含图片本体 + 元数据 (标题、分类、作者、tag)。" \
+  --no-gate
+```
+
+Recon walks the SPA via API discovery (`share.xmind.app/previews/{id}.png`),
+catalogs 990 maps in `all_maps_dedup.jsonl`, and selects 30 for harvest
+based on the requirement quantity.
 
 ---
 
@@ -118,97 +207,96 @@ Each run is isolated under its own directory:
 
 ```
 artifacts/{domain}/runs/{run_id}/
-├── samples/        ★ Primary data — the actual deliverable files
-│                   (zip / pdf / source code / images / full text)
-├── catalog/        Indexes, listings, API metadata about samples
-│                   (NOT primary data; recon notes only)
-├── workspace/      Exploration / debug / scratch
-├── transcripts/    Full LLM conversation per session (JSONL)
+├── samples/        ★ Primary data — actual files (audio / pdf / source / etc.)
+├── catalog/        Indexes, listings, API metadata — recon's universe handoff
+├── workspace/      Harvest agent's work area: scripts, checklist, errors.log
+│                   └── data/        Harvested dataset (the deliverable)
+├── transcripts/    Per-session LLM dialogue (JSONL, append-only)
 ├── sessions/       Per-session traces + screenshots
 ├── research/       Research subagent reports
-└── verification/   Verification subagent reports + verdict
+├── verification/   Audit reports + per-criterion verdicts
+├── requirement.txt The mission text
+└── strategy_report.md  Planner's final strategy summary
 ```
 
-The browser's persistent profile (cookies, login state, localStorage)
-lives separately at `artifacts/_profiles/{domain}/` and is shared
-across runs — log in once, future runs of the same domain reuse it.
+The browser's persistent profile lives separately at
+`artifacts/_profiles/{domain}/` and is shared across runs — log in
+once, future runs of the same domain reuse it.
 
 ---
 
-## Why no Docker
+## Configuration (`.env`)
 
-The repo previously had a `Dockerfile` + `docker-compose.yml` from an
-earlier vision. They've been removed because they conflict with how the
-agent actually works:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LLM_API_KEY` | yes | OpenAI-compatible API key |
+| `LLM_BASE_URL` | yes | Endpoint, e.g. `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | yes | Model name, e.g. `deepseek-v4-pro` |
+| `DATABASE_URL` | yes | PostgreSQL connection string |
+| `VISION_LLM_MODEL` | no | Multimodal model for `browse(visual=True)`; default `Doubao-Seed-2.0-pro` |
+| `BROWSER_WS_URL` | no | Remote Camoufox WebSocket URL |
+| `BROWSER_CDP_URL` | no | Remote Chromium CDP URL |
+| `RECON_HEADLESS` | no | Set to `1` to force headless recon (default headed) |
+| `ARTIFACTS_DIR` | no | Override artifacts root path (default `./artifacts`) |
+| `MAX_PLANNER_TOOL_CALLS` | no | Recon planner safety net (default 200) |
+| `MAX_SESSIONS` | no | Recon planner session cap (default 15) |
 
-- **Tkinter human-assist popup needs a host display** — no desktop in a
-  container, no popup.
-- **Camoufox stealth depends on real OS context** — running it inside a
-  Linux container changes the fingerprint surface in ways anti-bot
-  systems can detect (cgroup/namespace traces, Linux-vs-Windows
-  inconsistencies).
-- **Per-domain profile persistence** would have to bridge container
-  filesystem and the human's interactive login on the host — fragile.
+The agent has been verified against the following endpoints:
 
-Run the agent natively. If you don't want to install PostgreSQL on your
-host, you can run *just* PG in Docker:
-
-```bash
-docker run -d --name recon-pg \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=recon_agent \
-  -p 5432:5432 \
-  postgres:16
-
-# Then load schema:
-psql -h localhost -U postgres recon_agent < src/world_model/schema.sql
-```
+- DeepSeek official API
+- DeepSeek via company gateway (proxy)
+- Xiaomi MiMo Token Plan (`mimo-v2.5-pro`)
+- Doubao (`Doubao-Seed-2.0-pro`) for vision
+- Claude (`claude-opus-4-7`) for vision
 
 ---
 
-## Architecture
+## Tested Domains
 
-For the design rationale behind the agent layers, the World Model, and
-the abstraction-boundary principle that informs what's agent-visible vs
-infrastructure-internal:
+| Site | Stage Tested | Outcome | Notes |
+|------|------|---------|-------|
+| `openslr.org` | recon + harvest | recon PASS 6/6, harvest in-progress | 61 datasets cataloged, ~2.7GB samples |
+| `66rpg.com` (橙光) | recon | PASS 6/6 | Agent independently reverse-engineered CDN protocol |
+| `xmind.com` | recon + harvest | recon PASS 6/6, harvest blocked (audit caught satisficing) | 30 maps + previews delivered |
+| `chemrxiv.org` | recon | Did not complete | Hit Cloudflare Turnstile; agent escalated to `request_human_assist` |
+| `codepen.io` | recon | PASS | Earlier MVP test, SPA + public code |
+| `douyin.com` | recon | PASS | Earlier MVP test, login-required content |
 
-| Doc | What it covers |
-|-----|----------------|
-| `CLAUDE.md` | Implementation blueprint — module layout, technical constraints, hard architectural rules |
-| `docs/抽象边界原则.md` | Agent vs Infrastructure boundary — when to expose information, when to hide it (cookies, tabs, model quirks) |
-| `docs/Planner设计.md` | Planner: top-level tool-use agent, 6 tools, decides when to spawn execution / research / mark done |
-| `docs/WorldModel设计.md` | The 3-layer data architecture: Transcripts → Observations → Models |
-| `docs/工具重新设计共识.md` | Per-tool design notes for the 14 execution agent tools |
-| `docs/SystemPrompts设计.md` | System prompt structure for each agent layer |
+See `docs/three_missions_observations.md` for the detailed run-by-run
+findings.
 
 ---
 
-## Development
+## Documentation
 
-```bash
-# Run tests (lightweight, no actual browser/LLM calls)
-# (test scripts live under scripts/ for now)
+Design docs live under `docs/` and are organized by area:
 
-# Run a smoke test of the LLM gateway
-python -c "import asyncio; from src.llm.client import LLMClient; asyncio.run(LLMClient().chat_with_tools([{'role':'user','content':'hi'}], []))"
+| Doc | Area |
+|-----|------|
+| `CLAUDE.md` | Implementation blueprint — hard architectural constraints |
+| `docs/Planner设计.md` | Planner tool-use loop, 5 tools, decision policy |
+| `docs/AgentSession设计.md` | Execution agent loop, stop conditions, microcompact |
+| `docs/WorldModel设计.md` | 3-layer data architecture rationale |
+| `docs/工具重新设计共识.md` | Per-tool design notes for the 14 execution tools |
+| `docs/抽象边界原则.md` | Agent vs Infrastructure boundary — what to expose / hide |
+| `docs/SystemPrompts设计.md` | System prompt structure per agent layer |
+| `docs/three_missions_observations.md` | Latest E2E run log — 3 missions (chemrxiv / 66rpg / xmind) |
+| `docs/部门部署架构_local-recon_server-harvest.md` | Deployment direction discussion |
+| `docs/agent_stress_test_candidates.md` | Candidate stress-test targets sourced from internal needs |
 
-# Inspect the World Model after a run
-psql recon_agent -c "SELECT id, pattern FROM locations WHERE domain = 'ui8.net' ORDER BY id;"
-```
-
-Migration scripts (one-time DB or filesystem migrations) live in
-`scripts/` — typically you don't run them; they're run-once helpers
-for schema upgrades during development.
+A Chinese README is also available: `README-CN.md`.
 
 ---
 
 ## Status
 
-MVP. Tested against codepen.io (code samples), ui8.net (UI Kit
-extraction), douyin.com (login + content scraping). The system is
-domain-agnostic — there are no hardcoded site assumptions, but each
-new site type may surface new edge cases worth documenting in the
-World Model.
+MVP, actively iterating. Core pipeline (recon → handoff → harvest →
+audit) is verified end-to-end. Known limitations and follow-up bugs
+are tracked in `docs/three_missions_observations.md`.
+
+Built and tested primarily on Windows 11 + Python 3.14 with Camoufox
+135 / 150. The headed-browser hang historically tied to the Camoufox
+binary turned out to be an orphaned `parent.lock` from psutil-killed
+sessions; fixed in commit `ed8bcdb`.
 
 License: not yet specified.

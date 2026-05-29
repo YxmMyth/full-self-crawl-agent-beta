@@ -1,226 +1,442 @@
-"""maintain_model — LLM function that updates Semantic + Procedural Models.
+"""maintain_model — multi-step tool-use agent that updates models incrementally.
 
-NOT an agent. Single LLM call: current models + new observations → new models.
+Replaces the single-LLM-call rewrite mode. Reasons:
+  - Full rewrite per session telephone-games over many sessions → drift
+  - Single call paraphrases technical syntax (e.g. textarea.value → element.innerHTML)
+  - 121K input context dilutes attention on key obs
+
+New model: spawn an agent with tools to read individual obs, read current
+model text, apply patches (Codex DSL). Agent references obs ids instead of
+paraphrasing technique — eliminates drift at the root.
+
 Auto-triggered by Python code after each spawn_execution session ends.
+Caller passes since_obs_id snapshot so the agent knows which obs ids are new.
+Caller may pass compaction_mode=True (periodically) for a cleanup pass.
 
-See: docs/Planner设计.md §五, docs/SystemPrompts设计.md §六
+See: docs/SystemPrompts设计.md §六 (deprecated single-call mode)
 """
 
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-from src.config import Config
+from src.agent.tools.apply_patch import PatchParseError, apply_patch_to_text
+from src.agent.tools.registry import ToolRegistry
 from src.llm.client import LLMClient
 from src.utils.logging import get_logger
 from src.world_model import db
 
 logger = get_logger(__name__)
 
-# ── Prompt (from docs/SystemPrompts设计.md §六) ──────────
 
-_SYSTEM_PROMPT = """You update a site's knowledge models by incorporating new observations.
+# ── Prompts ──────────────────────────────────────────────
 
-## Input
 
-You receive:
-- Current Semantic Model (site structure, data distribution, relationships)
-- Current Procedural Model (extraction methods, access patterns, tools used)
-- New observations from the latest session
-- (First call only) Prior runs' Procedural Models — cross-run context from
-  previous missions on the same site. Use these as starting hints, but
-  filter aggressively: only carry over domain-level reusable knowledge
-  (URL patterns, methods that worked, auth requirements, known dead-ends).
-  Drop requirement-specific details (sample lists, item IDs, progress
-  counts from past missions).
+_MAINTAIN_SYSTEM_PROMPT = """You are a knowledge-base maintainer. You incrementally update two markdown files capturing what we know about a target site:
 
-## Task
+- `procedural.md` — how to extract data (methods, scripts, anti-bot, auth)
+- `semantic.md` — what data exists (locations, fields, relationships)
 
-Rewrite BOTH models to incorporate the new observations.
+After each crawl session, you receive the list of NEW observation ids
+written by that session. Use your tools to update the two files to reflect
+what was just learned.
 
-For the Semantic Model:
-- Add newly discovered locations, data fields, relationships
-- Update quantities, patterns, or structures that changed
-- Resolve contradictions (new evidence supersedes old assumptions)
-- Keep within ~8000 characters
+## Core principles
 
-For the Procedural Model:
-- Add successful extraction methods with specifics (endpoint, params, script)
-- Record failed approaches so they aren't retried
-- Update access patterns (auth requirements, rate limits, pagination)
-- Keep within ~6000 characters
+1. **Reference, don't paraphrase technical detail.**
+   When recording a method with a verbatim script in observations, write a
+   short description + "see obs #N for verbatim". Do NOT rewrite the script
+   in prose — LLMs paraphrase code WRONG systematically.
+
+   GOOD:
+     ### extract_pen_source [verified by obs #1065]
+     Brief: query textareas, filter by .value length > 30000, double JSON.parse on result.
+     See obs #1065 for verbatim browser_eval script.
+
+   BAD:
+     ### extract_pen_source
+     Use document.getElementById('init-data').innerHTML and parse __item.html...
+     (paraphrasing — likely wrong)
+
+2. **Two sections in procedural.md.**
+   - `## Verified Methods` — precious. Append-only unless replacing with stronger
+     evidence. Every entry carries `[verified by obs #N]`.
+   - `## Working Notes` — hypotheses, partial findings, can be consolidated or
+     dropped later.
+
+   New methods start in Working Notes. When a later obs verifies a Working
+   Note method, MOVE it to Verified (delete from working, add to verified) in
+   the same patch.
+
+3. **Patch, don't rewrite.**
+   Use `apply_patch` with `*** Update File: procedural.md` or `semantic.md`.
+   Make MINIMAL edits with `@@ <context>` anchors. Don't rewrite a whole
+   section when you only want to add one line.
+
+4. **Add AND remove in the same patch when superseding.**
+   When you add a method that supersedes an older hypothesis, also remove or
+   mark the older one deprecated. Don't leave stale entries.
+
+5. **If nothing significant changed, just mark_done.**
+   No-op sessions are fine. Don't force a patch when there's genuinely no
+   new information.
+
+## Workflow
+
+1. `read_model("procedural")` and `read_model("semantic")` to see current state.
+2. Skim the new observation index (in your first user message). `read_observation(id)`
+   for the ones carrying new technique / method / structure information. You
+   don't need to read all of them.
+3. Use `think` to plan if non-trivial.
+4. `apply_patch(...)` with Codex DSL. Multiple patches per session are fine.
+5. `mark_done(reason)` when both files reflect the new observations.
+
+## apply_patch DSL reminder
+
+```
+*** Begin Patch
+*** Update File: procedural.md
+@@ ## Verified Methods
+ ### existing_method [verified by obs #100]
+ Brief desc here.
++
++### new_method [verified by obs #1234]
++Brief: <one sentence>.
++See obs #1234 for verbatim script.
+*** End Patch
+```
+
+Use `@@ <context>` to anchor the section; ` ` (space) prefix for unchanged
+context, `+` for added, `-` for removed.
+
+Allowed Update File paths: `procedural.md`, `semantic.md` only.
+Add File / Delete File / Move not supported here — both files always exist
+(empty if first session)."""
+
+
+_COMPACTION_SYSTEM_PROMPT = """You are doing periodic cleanup of the knowledge
+base. Files `procedural.md` and `semantic.md` have accumulated entries over
+multiple sessions and may have redundancy, stale hypotheses, or working notes
+that should be promoted to verified.
+
+## What to look for
+
+1. **Working Notes that obs has since verified.** Promote to Verified Methods.
+   Use `read_observation(id)` on the cited obs ids to confirm. Move the entry
+   in the same patch (delete from Working, add to Verified).
+
+2. **Superseded methods.** If a newer verified method replaces an older one,
+   delete the older one.
+
+3. **Redundant entries.** Multiple notes saying the same thing → keep the most
+   precise one (usually the one with the most specific obs reference), drop
+   the rest.
+
+4. **Stale hypotheses.** Working Notes that haven't gained evidence in many
+   sessions and aren't actionable → drop.
 
 ## Rules
 
-- MERGE, don't append. Rewrite the full model, integrating old and new.
-- When space is tight, compress older/less important details.
-  Recent findings and working methods get priority.
-- Preserve specific numbers, URLs, and field names — these are
-  high-value facts that can't be recovered from summaries.
-- If new observations contradict the existing model, trust the
-  new observations and note the change.
+- Use `apply_patch` to make minimal edits. Don't rewrite whole sections.
+- Read obs before promoting Working Notes → Verified (verify the evidence is
+  real, not just plausible-sounding).
+- If everything looks clean, just `mark_done("no cleanup needed")`.
+- Allowed Update File paths: `procedural.md`, `semantic.md`."""
 
-## Output
 
-Return your output in EXACTLY this format:
+# ── Tool schema (built once) ─────────────────────────────
 
-===SEMANTIC_MODEL===
-(full rewritten Semantic Model here)
-===END_SEMANTIC===
 
-===PROCEDURAL_MODEL===
-(full rewritten Procedural Model here)
-===END_PROCEDURAL===
+_TOOLS_SCHEMA = [
+    {
+        "name": "read_observation",
+        "description": (
+            "Fetch one observation by id. Returns the full raw JSON — no "
+            "truncation — so you can quote verbatim into model references "
+            "(e.g., `see obs #N for verbatim browser_eval script`)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Observation primary key."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "read_model",
+        "description": "Read current text of one model file (procedural or semantic).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_type": {"type": "string", "enum": ["procedural", "semantic"]},
+            },
+            "required": ["model_type"],
+        },
+    },
+    {
+        "name": "apply_patch",
+        "description": (
+            "Apply a Codex apply_patch DSL to model files. Allowed Update File "
+            "paths: procedural.md, semantic.md only. Returns updated char counts "
+            "on success or a parse/apply error message."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": (
+                        "Patch text starting with '*** Begin Patch' and ending "
+                        "with '*** End Patch'. Use real LF newlines."
+                    ),
+                },
+            },
+            "required": ["patch"],
+        },
+    },
+    {
+        "name": "think",
+        "description": "Reason without side effects. Use to plan before complex patches.",
+        "parameters": {
+            "type": "object",
+            "properties": {"thought": {"type": "string"}},
+            "required": ["thought"],
+        },
+    },
+    {
+        "name": "mark_done",
+        "description": "Signal maintenance complete. Ends the agent loop.",
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "required": [],
+        },
+    },
+]
 
-===SESSION_SUMMARY===
-(2-3 sentence summary of what this session discovered/accomplished)
-===END_SUMMARY===
+_ALLOWED_PATHS = {"procedural.md", "semantic.md"}
+_MAX_STEPS = 30
 
-===MODEL_DIFF===
-(brief list of what changed in each model)
-===END_DIFF==="""
+
+# ── Agent loop ───────────────────────────────────────────
 
 
 async def maintain_and_summarize(
     llm: LLMClient,
     domain: str,
     session_id: str,
+    since_obs_id: int | None = None,
+    compaction_mode: bool = False,
 ) -> dict[str, Any]:
-    """Update models and generate session summary.
+    """Run the maintain agent. Replaces the old single-call rewrite.
 
-    Called automatically after each execution session ends.
-    NOT a tool — Python code triggers this.
+    Args:
+        since_obs_id: snapshot of max obs id BEFORE this session ran. Agent is
+                      told "new obs ids are anything > since_obs_id". None →
+                      treat all obs as new (first call).
+        compaction_mode: if True, run periodic cleanup prompt instead of
+                         incremental update prompt.
 
     Returns:
-        {summary, model_diff, new_obs_count, semantic_version, procedural_version}
+        {summary, model_diff, new_obs_count}
     """
-    # Load current models
-    current_semantic, current_procedural = await db.load_both_models(domain)
+    current_semantic = await db.load_model(domain, "semantic")
+    current_procedural = await db.load_model(domain, "procedural")
 
-    # Load new observations from this session's locations
-    all_observations = await db.list_observations_by_domain(domain)
-    new_obs_text = _format_observations(all_observations)
-    new_obs_count = len(all_observations)
-
-    # First-call detection — both this run's models empty.
-    # Cross-run inheritance: pull prior runs' Procedural Models as context.
-    # Only on first call (when there's no current run knowledge to merge with).
-    is_first_call = not (current_semantic or current_procedural)
-    prior_block = ""
-    if is_first_call:
-        try:
-            prior_runs = await db.list_runs(domain)
-            relevant = [
-                r for r in prior_runs
-                if r.get("run_id") and r["run_id"] != Config.RUN_ID
-            ][:2]  # 2 most recent prior runs (already sorted DESC by last_obs)
-            chunks: list[str] = []
-            for r in relevant:
-                _, prior_proc = await db.load_both_models(domain, run_id=r["run_id"])
-                if prior_proc:
-                    chunks.append(f"### From run `{r['run_id']}`\n\n{prior_proc}")
-            if chunks:
-                prior_block = (
-                    "\n\n## Prior runs' Procedural Models "
-                    "(cross-run context — first call only)\n\n"
-                    + "\n\n".join(chunks)
-                    + "\n\nFilter when merging into this run's Procedural Model: "
-                    "carry over only DOMAIN-level reusable knowledge (URL "
-                    "patterns, working access methods, auth requirements, "
-                    "known dead-ends). DROP requirement-specific data (sample "
-                    "lists, progress numbers, item IDs from other missions). "
-                    "When in doubt, treat as 'verified hint, may need "
-                    "re-validation in this run'."
-                )
-                logger.info(f"maintain_model: injecting prior context from {len(chunks)} prior run(s)")
-        except Exception as e:
-            logger.warning(f"maintain_model: prior-run context load failed: {e}")
-
-    # Build prompt
-    prompt_parts = []
-
-    if current_semantic:
-        prompt_parts.append(f"## Current Semantic Model\n\n{current_semantic}")
+    # In compaction mode, list ALL obs as "available for verification";
+    # otherwise only obs newer than the snapshot.
+    if compaction_mode:
+        all_obs = await db.list_observations_by_domain(domain, run_id="*")
+        new_obs = all_obs
     else:
-        prompt_parts.append("## Current Semantic Model\n\n(empty — first session)")
+        new_obs = await db.list_observations_since(domain, since_obs_id, run_id="*")
+    new_obs_count = len(new_obs)
 
-    prompt_parts.append("")
+    state = {
+        "semantic": current_semantic,
+        "procedural": current_procedural,
+        "edited": False,
+        "done": False,
+        "done_reason": "",
+    }
 
-    if current_procedural:
-        prompt_parts.append(f"## Current Procedural Model\n\n{current_procedural}")
+    registry = _build_registry(state)
+
+    new_ids_summary = _format_obs_index(new_obs)
+    if compaction_mode:
+        system_prompt = _COMPACTION_SYSTEM_PROMPT
+        user_prompt = (
+            f"Periodic cleanup round. {new_obs_count} observations exist under "
+            f"this domain.\n\nObservation index (id + location):\n"
+            f"{new_ids_summary}\n\nRead the current procedural.md and "
+            f"semantic.md, decide what to consolidate / drop / promote, then "
+            f"apply patches. mark_done when finished."
+        )
+    elif new_obs_count == 0:
+        system_prompt = _MAINTAIN_SYSTEM_PROMPT
+        user_prompt = (
+            "No new observations this session (since_obs_id matches current "
+            "max). Nothing to incorporate — call mark_done."
+        )
     else:
-        prompt_parts.append("## Current Procedural Model\n\n(empty — first session)")
+        system_prompt = _MAINTAIN_SYSTEM_PROMPT
+        user_prompt = (
+            f"This session produced {new_obs_count} new observation(s). "
+            f"Update procedural.md and semantic.md to incorporate them.\n\n"
+            f"New observation index (id + location):\n{new_ids_summary}\n\n"
+            f"Read the ones that look interesting, then patch. mark_done when "
+            f"finished."
+        )
 
-    if prior_block:
-        prompt_parts.append(prior_block)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
-    prompt_parts.append(f"\n## New Observations ({new_obs_count} total)\n\n{new_obs_text}")
-
-    user_prompt = "\n".join(prompt_parts)
-
-    # Single LLM call
     logger.info(
-        f"maintain_model: updating models for {domain} (session {session_id}, {new_obs_count} observations)",
-        extra={"domain": domain, "session_id": session_id},
+        f"maintain_model agent start: domain={domain}, session={session_id}, "
+        f"new_obs={new_obs_count}, compaction={compaction_mode}"
     )
 
-    result = await llm.generate(user_prompt, system=_SYSTEM_PROMPT)
-    if not result:
-        logger.error("maintain_model: LLM returned empty")
-        return {
-            "summary": "Model update failed (empty LLM response)",
-            "model_diff": "",
-            "new_obs_count": new_obs_count,
-        }
+    steps = 0
+    for _ in range(_MAX_STEPS):
+        response = await llm.chat_with_tools(messages, registry.openai_schemas())
+        if response is None:
+            logger.warning("maintain_model: LLM returned empty")
+            break
 
-    # Parse structured output
-    parsed = _parse_output(result)
+        messages.append(response.to_assistant_message())
 
-    # Write models to DB
-    if parsed["semantic"]:
-        await db.upsert_model(domain, "semantic", parsed["semantic"])
-        logger.info(f"Semantic Model updated ({len(parsed['semantic'])} chars)")
+        if not response.tool_calls:
+            logger.info("maintain_model: agent stopped naturally (no tool calls)")
+            break
 
-    if parsed["procedural"]:
-        await db.upsert_model(domain, "procedural", parsed["procedural"])
-        logger.info(f"Procedural Model updated ({len(parsed['procedural'])} chars)")
+        for tc in response.tool_calls:
+            steps += 1
+            try:
+                result = await registry.execute(tc.name, None, **tc.arguments)
+            except Exception as e:
+                result = f"Tool {tc.name} crashed: {e}"
+            content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": content,
+            })
+
+        if state["done"]:
+            break
+
+    if state["edited"]:
+        await db.upsert_model(domain, "semantic", state["semantic"])
+        await db.upsert_model(domain, "procedural", state["procedural"])
+        logger.info(
+            f"maintain_model: models updated "
+            f"(sem={len(state['semantic'])} chars, "
+            f"proc={len(state['procedural'])} chars, steps={steps})"
+        )
+    else:
+        logger.info(f"maintain_model: no edits this round (steps={steps})")
 
     return {
-        "summary": parsed["summary"],
-        "model_diff": parsed["diff"],
+        "summary": state["done_reason"] or "(no summary)",
+        "model_diff": f"edited={state['edited']}, new_obs={new_obs_count}, steps={steps}",
         "new_obs_count": new_obs_count,
     }
 
 
-def _format_observations(observations: list) -> str:
-    """Format observations for the maintain_model prompt."""
-    if not observations:
-        return "(no observations)"
-
-    lines = []
-    for obs in observations:
-        loc = obs.location_id
-        raw_str = json.dumps(obs.raw, ensure_ascii=False)
-        # Truncate very long observations
-        if len(raw_str) > 1000:
-            raw_str = raw_str[:997] + "..."
-        lines.append(f"[{loc}] {raw_str}")
-
-    return "\n\n".join(lines)
+# ── Tool registry construction ───────────────────────────
 
 
-def _parse_output(text: str) -> dict[str, str]:
-    """Parse the structured output from the LLM."""
-    def _extract(start_marker: str, end_marker: str) -> str:
-        pattern = re.escape(start_marker) + r"\s*\n?(.*?)\n?\s*" + re.escape(end_marker)
-        match = re.search(pattern, text, re.DOTALL)
-        return match.group(1).strip() if match else ""
+def _build_registry(state: dict[str, Any]) -> ToolRegistry:
+    """Build a ToolRegistry with handlers closed over the agent's state dict."""
 
-    return {
-        "semantic": _extract("===SEMANTIC_MODEL===", "===END_SEMANTIC==="),
-        "procedural": _extract("===PROCEDURAL_MODEL===", "===END_PROCEDURAL==="),
-        "summary": _extract("===SESSION_SUMMARY===", "===END_SUMMARY==="),
-        "diff": _extract("===MODEL_DIFF===", "===END_DIFF==="),
+    async def read_observation_handler(_ctx, **kwargs):
+        try:
+            obs_id = int(kwargs.get("id", 0))
+        except (TypeError, ValueError):
+            return "Error: id must be an integer"
+        obs = await db.get_observation_by_id(obs_id)
+        if obs is None:
+            return f"Error: observation #{obs_id} not found"
+        return json.dumps({
+            "id": obs.id,
+            "location_id": obs.location_id,
+            "agent_step": obs.agent_step,
+            "raw": obs.raw,
+        }, ensure_ascii=False)
+
+    async def read_model_handler(_ctx, **kwargs):
+        mt = kwargs.get("model_type", "")
+        if mt == "procedural":
+            return state["procedural"] or "(empty)"
+        if mt == "semantic":
+            return state["semantic"] or "(empty)"
+        return f"Error: model_type must be 'procedural' or 'semantic', got {mt!r}"
+
+    async def apply_patch_handler(_ctx, **kwargs):
+        patch = kwargs.get("patch", "")
+        if not patch.strip():
+            return "Error: empty patch"
+        files = {
+            "procedural.md": state["procedural"] or "",
+            "semantic.md": state["semantic"] or "",
+        }
+        try:
+            new_files = apply_patch_to_text(files, patch, allowed_paths=_ALLOWED_PATHS)
+        except PatchParseError as e:
+            return f"Patch error: {e}"
+        changes = []
+        for path, attr in (("procedural.md", "procedural"), ("semantic.md", "semantic")):
+            old = files[path]
+            new = new_files.get(path, old)
+            if new != old:
+                state[attr] = new
+                state["edited"] = True
+                changes.append(f"{path}: {len(old)} -> {len(new)} chars")
+        if not changes:
+            return "Patch applied but produced no net change (no-op)"
+        return "Patch applied:\n" + "\n".join(changes)
+
+    async def think_handler(_ctx, **_kwargs):
+        return "(thought recorded)"
+
+    async def mark_done_handler(_ctx, **kwargs):
+        state["done"] = True
+        state["done_reason"] = kwargs.get("reason", "")
+        return "(model maintenance complete)"
+
+    handlers = {
+        "read_observation": read_observation_handler,
+        "read_model": read_model_handler,
+        "apply_patch": apply_patch_handler,
+        "think": think_handler,
+        "mark_done": mark_done_handler,
     }
+
+    registry = ToolRegistry()
+    for tool_def in _TOOLS_SCHEMA:
+        registry.register(
+            tool_def["name"],
+            tool_def["description"],
+            tool_def["parameters"],
+            handlers[tool_def["name"]],
+        )
+    return registry
+
+
+# ── Helpers ──────────────────────────────────────────────
+
+
+def _format_obs_index(obs_list) -> str:
+    """One-line-per-obs index. Just id + location_id; raw fetched on demand."""
+    if not obs_list:
+        return "(none)"
+    lines = []
+    for o in obs_list[:200]:
+        lines.append(f"  #{o.id} [{o.location_id}]")
+    if len(obs_list) > 200:
+        lines.append(f"  ... ({len(obs_list) - 200} more)")
+    return "\n".join(lines)

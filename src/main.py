@@ -1,14 +1,21 @@
 """CLI entry point — run the Full-Self-Crawl-Agent.
 
-Initializes all components, runs ReconPlanner, cleans up.
-MVP: hardcoded domain + requirement (no CLI argument parsing).
+Subcommands:
+  explore <domain> <requirement>          # recon only (build World Model + samples)
+  harvest <domain> [--from-run <id>]      # harvest against an existing recon run
+  auto    <domain> <requirement> [--no-gate]  # recon → gate → harvest
+
+Back-compat: positional `<domain> <requirement>` (no subcommand) is still
+accepted and treated as `explore`.
 
 See: CLAUDE.md §一 系统概述
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -49,7 +56,7 @@ def build_execution_registry() -> ToolRegistry:
     return registry
 
 
-async def run(domain: str, requirement: str) -> None:
+async def run_explore(domain: str, requirement: str) -> None:
     """Full reconnaissance run — initialize, plan, execute, cleanup."""
 
     # Validate required config
@@ -74,8 +81,16 @@ async def run(domain: str, requirement: str) -> None:
     # any subsequent browser_reset(). Tkinter desktop popup is the default —
     # always-on-top regardless of which app the user is currently looking at.
     browser_manager.gateway = TkinterPopupGateway()
-    ctx = await browser_manager.launch()
-    logger.info("Browser launched, human_assist gateway = TkinterPopup")
+    # Default headed (recon's human_assist relies on visible window). Override
+    # via RECON_HEADLESS=1 when headed Camoufox launch hangs (Juggler/
+    # removeProgressListener bug observed on Windows + Python 3.14 + recent
+    # Camoufox — see docs/openslr_run_observations.md 2026-05-26).
+    recon_headless = os.getenv("RECON_HEADLESS", "0") == "1"
+    ctx = await browser_manager.launch(headed=not recon_headless)
+    logger.info(
+        f"Browser launched (headless={recon_headless}), "
+        f"human_assist gateway = TkinterPopup"
+    )
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
@@ -114,24 +129,99 @@ async def run(domain: str, requirement: str) -> None:
     logger.info("All resources cleaned up")
 
 
-def main() -> None:
-    """Entry point — accepts domain + requirement as CLI args or uses defaults."""
-    setup(level="INFO")
+async def run_harvest_only(domain: str, source_run_id: str | None) -> None:
+    """Run harvest standalone against an existing recon run."""
+    from src.harvest.launcher import run_harvest
+    await run_harvest(domain, source_run_id=source_run_id)
 
-    if len(sys.argv) >= 3:
-        domain = sys.argv[1]
-        requirement = sys.argv[2]
-    else:
-        # No CLI args — show usage and exit. The agent is domain-agnostic;
-        # there is no canonical default site.
+
+async def run_auto(domain: str, requirement: str, no_gate: bool) -> None:
+    """End-to-end: recon → optional human gate → harvest."""
+    from src.cli.gate import ask_continue_to_harvest, open_requirement_for_edit
+    from src.harvest.launcher import run_harvest
+
+    # Phase 1: recon (sets Config.RUN_ID as a side effect)
+    await run_explore(domain, requirement)
+    source_run_id = Config.RUN_ID
+
+    # Phase 2: human gate between recon and harvest
+    if not no_gate:
+        decision = ask_continue_to_harvest(domain)
+        if decision == "stop":
+            logger.info("Operator chose to stop after recon. Skipping harvest.")
+            return
+        if decision == "edit":
+            new_req = open_requirement_for_edit(domain)
+            logger.info(f"Requirement after edit: {new_req[:200]}")
+        # else: 'continue' → fall through
+
+    # Phase 3: harvest against the same run_id
+    await run_harvest(domain, source_run_id=source_run_id)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse CLI args. Falls back to legacy positional form if no subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="full-self-crawl",
+        description="LLM-driven website reconnaissance + harvest agent.",
+    )
+    sub = parser.add_subparsers(dest="mode")
+
+    p_explore = sub.add_parser("explore", help="Reconnaissance only (build WM + samples)")
+    p_explore.add_argument("domain")
+    p_explore.add_argument("requirement")
+
+    p_harvest = sub.add_parser("harvest", help="Harvest against an existing recon run")
+    p_harvest.add_argument("domain")
+    p_harvest.add_argument(
+        "--from-run",
+        dest="from_run",
+        default=None,
+        help="Source recon run_id (default: latest run for the domain)",
+    )
+
+    p_auto = sub.add_parser("auto", help="Recon → human gate → Harvest")
+    p_auto.add_argument("domain")
+    p_auto.add_argument("requirement")
+    p_auto.add_argument(
+        "--no-gate",
+        action="store_true",
+        help="Skip the human gate between recon and harvest",
+    )
+
+    # Legacy form: `<domain> <requirement>` (no subcommand) → treat as explore
+    if len(argv) >= 2 and argv[0] not in {"explore", "harvest", "auto", "-h", "--help"}:
+        # Looks like the old positional form. Synthesize an `explore` subcommand.
+        if len(argv) == 2:
+            argv = ["explore", argv[0], argv[1]]
+
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    """Entry point — dispatch on subcommand."""
+    setup(level="INFO")
+    args = _parse_args(sys.argv[1:])
+
+    if args.mode is None:
         print(
-            "Usage: python src/main.py <domain> <requirement>\n"
-            "  e.g. python src/main.py example.com '采集若干代表性样本'"
+            "Usage:\n"
+            "  python -m src.main explore <domain> <requirement>\n"
+            "  python -m src.main harvest <domain> [--from-run <run_id>]\n"
+            "  python -m src.main auto    <domain> <requirement> [--no-gate]\n"
         )
         sys.exit(2)
 
     try:
-        asyncio.run(run(domain, requirement))
+        if args.mode == "explore":
+            asyncio.run(run_explore(args.domain, args.requirement))
+        elif args.mode == "harvest":
+            asyncio.run(run_harvest_only(args.domain, args.from_run))
+        elif args.mode == "auto":
+            asyncio.run(run_auto(args.domain, args.requirement, args.no_gate))
+        else:
+            print(f"Unknown mode: {args.mode}")
+            sys.exit(2)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:

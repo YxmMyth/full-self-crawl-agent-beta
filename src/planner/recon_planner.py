@@ -24,7 +24,7 @@ from src.llm.maintain_model import maintain_and_summarize
 from src.recording.agent import RecordingAgent
 from src.research.agent import run_research
 from src.utils.logging import get_logger
-from src.verification.agent import run_verification
+from src.verification.audit import run_audit
 from src.world_model import db
 
 logger = get_logger(__name__)
@@ -67,8 +67,34 @@ workspace/.
    - samples/ already has the deliverables for the requirement → mark_done. \
 Do NOT spawn another execution to re-confirm what's already on disk.
 
-mark_done may be rejected with specific gaps. Address those gaps \
-and continue.
+## Completion Audit (mark_done discipline)
+
+Calling mark_done is a CLAIM that the World Model + samples/catalog/scripts \
+contain everything the harvest stage needs to take over without re-discovering \
+basics. Treat that claim as unproven until you have verified it against the \
+actual current state. Before calling mark_done(status='complete'):
+
+- For each L1-L4 stage, identify the EVIDENCE in the Model that proves you \
+reached it (a quote, a location count, a specific file under samples/).
+- Treat indirect or uncertain evidence as not done — gather stronger \
+evidence or spawn another session instead of marking complete.
+- Do NOT mark complete merely because budget feels nearly exhausted, because \
+you're stopping work, or because the planner narrative reads plausibly. \
+mark_done is verified, not narrated.
+- Do NOT redefine success around what already exists. If the requirement \
+names data you haven't located, you are not done — keep working.
+
+mark_done(status='complete') triggers a two-phase audit:
+  Phase 1 — mechanical sanity (semantic.md > 200 chars, procedural.md > 200 \
+chars, locations >= 3, samples/+catalog/ >= 1 file). Fast fail on empty WM.
+  Phase 2 — LLM evidence-by-evidence check of L1/L2/L3/L4/Scalability.
+
+If the audit blocks you, the specific gaps come back — address them and \
+call mark_done again. If you are truly at an impasse and cannot make \
+meaningful progress without operator input or an external state change \
+(same blocker recurred 3+ goal rounds), call \
+mark_done(status='blocked', reason='...') instead. Never use 'blocked' \
+because the work is hard, slow, or uncertain.
 
 ## Writing Briefings
 
@@ -78,6 +104,25 @@ Your briefing to the execution agent should include:
 of previous sessions)
 - STARTING POINT: a specific URL or approach
 - COMPLETION CRITERIA: what counts as "done" for this session
+
+## Universe is part of recon's deliverable
+
+Recon's output to harvest is THREE things, not two:
+  1. World Model (semantic + procedural) — how the site works
+  2. samples/ — sketch primary data proving methods work
+  3. catalog/ — the **enumerable universe** of every entity matching \
+     the requirement scope (the list harvest must cover)
+
+Without (3), harvest cannot verify "all of it" — it doesn't know what \
+the universe is. Your briefings must explicitly direct an execution \
+session to enumerate the universe to catalog/ before you call mark_done. \
+This often takes a dedicated session: "Enumerate every pen ID under \
+the webgl tag listing — paginate to the end via cursor, save to \
+catalog/webgl_pens.jsonl."
+
+If the universe is unbounded (infinite feed, no total, no exhaustion \
+method), recon agent should document the boundedness in procedural \
+model. Strategy report will surface it to the human gate.
 
 ## Principles
 
@@ -218,15 +263,41 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "mark_done",
             "description": (
-                "Mark reconnaissance as complete. May be rejected if verification "
-                "finds gaps — in that case, address the gaps and continue."
+                "Terminate reconnaissance. Two valid statuses:\n"
+                "  - 'complete': you believe the World Model + samples/catalog "
+                "satisfy the requirement. Triggers a two-phase audit "
+                "(mechanical sanity + LLM evidence-by-evidence check of L1-L4 "
+                "stages + scalability). PASS → recon ends. BLOCKED → "
+                "specific gaps returned, you continue.\n"
+                "  - 'blocked': you are at a true impasse and cannot make "
+                "meaningful progress without operator input or an external "
+                "state change. Use sparingly — only when the same blocker has "
+                "recurred for 3+ goal rounds. NEVER use 'blocked' merely "
+                "because the work is slow, uncertain, or incomplete."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reason": {"type": "string", "description": "Why you believe reconnaissance is complete."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["complete", "blocked"],
+                        "description": (
+                            "'complete' = objective achieved (will be audited). "
+                            "'blocked' = at impasse, need external help."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "For 'complete': what concretely got done — quote "
+                            "evidence (samples/X has Y files, semantic.md says Z, "
+                            "scripts/foo.py replicates the extraction). "
+                            "For 'blocked': what specifically you cannot move "
+                            "past and why."
+                        ),
+                    },
                 },
-                "required": ["reason"],
+                "required": ["status", "reason"],
             },
         },
     },
@@ -339,9 +410,15 @@ class ReconPlanner:
                     "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                 })
 
-                # Check for DONE
-                if tc.name == "mark_done" and isinstance(result, str) and '"status": "DONE"' in result:
-                    return "done"
+                # Check for DONE — parse the JSON result rather than substring
+                # so 'audit_blocked' can't accidentally match 'DONE'.
+                if tc.name == "mark_done" and isinstance(result, str):
+                    try:
+                        parsed = json.loads(result)
+                        if parsed.get("status") == "DONE":
+                            return f"done:{parsed.get('outcome', 'complete')}"
+                    except json.JSONDecodeError:
+                        pass
 
             # Context size check
             total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
@@ -363,7 +440,10 @@ class ReconPlanner:
             elif name == "think":
                 return json.dumps({"thought": args.get("thought", "")})
             elif name == "mark_done":
-                return await self._mark_done(args.get("reason", ""))
+                return await self._mark_done(
+                    args.get("status", "complete"),
+                    args.get("reason", ""),
+                )
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -383,8 +463,12 @@ class ReconPlanner:
 
         logger.info(f"Spawning execution session {session_id}")
 
-        # Snapshot artifact dirs BEFORE the session runs
+        # Snapshot artifact dirs + max obs id BEFORE the session runs.
+        # The obs-id snapshot lets maintain_model see exactly which obs ids
+        # this session produced (id > snapshot) — required for incremental
+        # patch mode instead of full rewrite of the procedural/semantic model.
         before = self._snapshot_artifacts()
+        since_obs_id = await db.max_observation_id_for_domain(self.domain)
 
         # Create and run session
         session = AgentSession(
@@ -401,8 +485,18 @@ class ReconPlanner:
 
         session_result = await session.run()
 
-        # maintain_model: update Semantic + Procedural models
-        model_result = await maintain_and_summarize(self.llm, self.domain, session_id)
+        # maintain_model: incremental update of Semantic + Procedural via tool-use agent.
+        # Compaction round every 5 sessions to consolidate Working Notes → Verified
+        # and drop stale entries (otherwise model file grows unbounded under
+        # incremental-only mode).
+        is_compaction = self.session_count > 0 and self.session_count % 5 == 0
+        model_result = await maintain_and_summarize(
+            self.llm,
+            self.domain,
+            session_id,
+            since_obs_id=since_obs_id,
+            compaction_mode=is_compaction,
+        )
 
         # Snapshot AFTER and diff
         after = self._snapshot_artifacts()
@@ -571,22 +665,156 @@ class ReconPlanner:
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    async def _mark_done(self, reason: str) -> str:
-        if Config.VERIFICATION_SUBAGENT_ENABLED:
-            verdict, gaps = await run_verification(
-                self.llm, self.domain, self.requirement, reason,
-            )
-            if verdict == "PASS":
-                return json.dumps({"status": "DONE"})
+    async def _mark_done(self, status: str, reason: str) -> str:
+        status = (status or "complete").strip().lower()
+
+        # 'blocked' is the explicit "I'm at an impasse" escape hatch — borrow
+        # from codex /goal. Recon ends without claiming success.
+        if status == "blocked":
+            logger.warning(f"Planner declared BLOCKED: {reason[:200]}")
+            await self._emit_strategy_report(audit_result=None, blocked_reason=reason)
+            return json.dumps({
+                "status": "DONE",
+                "outcome": "blocked",
+                "reason": reason,
+            })
+
+        # 'complete' (default) — run the two-phase audit.
+        result = await run_audit(
+            self.llm, self.domain, self.requirement, reason,
+        )
+        if result.overall == "PASS":
+            await self._emit_strategy_report(audit_result=result, blocked_reason=None)
+            return json.dumps({"status": "DONE", "outcome": "complete"})
+
+        # BLOCKED — feed back specific gaps to the planner.
+        return json.dumps({
+            "status": "audit_blocked",
+            "phase": result.phase,
+            "feedback": result.feedback()[:3000],
+            "message": (
+                "Audit blocked mark_done. Address the gaps above and call "
+                "mark_done again, or use mark_done(status='blocked', ...) "
+                "if you're truly at an impasse."
+            ),
+        })
+
+    async def _emit_strategy_report(
+        self,
+        audit_result: Any = None,
+        blocked_reason: str | None = None,
+    ) -> None:
+        """Write a human-readable strategy report after recon ends.
+
+        Read by the gate (CLI prompt between recon and harvest) so the
+        operator can decide: continue / narrow scope / stop. Failure to
+        generate the LLM portion does NOT block DONE — recon is complete
+        regardless.
+
+        The universe section at the top is the gate's primary decision
+        input: bounded vs unbounded, size estimate, catalog pointer.
+        """
+        run_dir = Config.run_dir(self.domain)
+        try:
+            semantic, procedural = await db.load_both_models(self.domain)
+
+            samples_dir = run_dir / "samples"
+            sample_count = 0
+            sample_listing = "(none)"
+            if samples_dir.is_dir():
+                files = sorted(p for p in samples_dir.iterdir() if p.is_file())
+                sample_count = len(files)
+                if files:
+                    sample_listing = "\n".join(
+                        f"- {p.name} ({p.stat().st_size} bytes)" for p in files[:20]
+                    )
+                    if sample_count > 20:
+                        sample_listing += f"\n... ({sample_count - 20} more)"
+
+            catalog_dir = run_dir / "catalog"
+            catalog_count = 0
+            catalog_listing = "(none)"
+            if catalog_dir.is_dir():
+                cfiles = sorted(p for p in catalog_dir.iterdir() if p.is_file())
+                catalog_count = len(cfiles)
+                if cfiles:
+                    catalog_listing = "\n".join(
+                        f"- {p.name} ({p.stat().st_size} bytes)" for p in cfiles[:20]
+                    )
+                    if catalog_count > 20:
+                        catalog_listing += f"\n... ({catalog_count - 20} more)"
+
+            # Universe header — sourced from audit if available, else
+            # heuristic from disk. This is the FIRST thing the human reads.
+            if audit_result is not None and getattr(audit_result, "universe", None):
+                u = audit_result.universe
+                universe_header = (
+                    f"- Bounded: {'yes' if u.bounded else 'NO (gate decision needed)'}\n"
+                    f"- Size estimate: {u.size_estimate}\n"
+                    f"- Catalog pointer: {u.catalog_pointer}\n"
+                )
             else:
-                return json.dumps({
-                    "status": "blocked",
-                    "verdict": verdict,
-                    "gaps": gaps[:2000],
-                    "message": "Verification found gaps. Address them and try again.",
-                })
-        else:
-            return json.dumps({"status": "DONE"})
+                universe_header = (
+                    f"- Bounded: unknown (no audit data)\n"
+                    f"- Size estimate: unknown\n"
+                    f"- Catalog pointer: see catalog/ listing below\n"
+                )
+
+            blocked_header = ""
+            if blocked_reason:
+                blocked_header = (
+                    f"## ⚠ Planner declared BLOCKED\n\n{blocked_reason}\n\n"
+                    "Reconnaissance ended without a clean audit. Review the WM "
+                    "and decide whether to launch harvest anyway, retry recon, "
+                    "or narrow the requirement.\n\n"
+                )
+
+            system_prompt = (
+                "You are summarizing reconnaissance results for a human operator "
+                "who is about to decide whether to start the harvest stage. Be "
+                "concrete and brief — at most 30 lines of markdown. Answer:\n"
+                "1. What is the primary data on this site?\n"
+                "2. What access methods were discovered (rank from easiest to hardest)?\n"
+                "3. What auth is required (none / cookies / login / 2FA)?\n"
+                "4. What anti-bot defenses were observed?\n"
+                "5. How many samples are on disk? In what format?\n"
+                "6. Universe enumeration: is catalog/ complete? bounded? how does\n"
+                "   the procedural model say to enumerate it?\n"
+                "7. Any specific concerns the operator should know before harvest.\n\n"
+                "Do NOT recommend a harvest tier or specific tools — the harvest "
+                "agent decides its own approach. Stick to facts and observations."
+            )
+            user_msg = (
+                f"## Requirement\n{self.requirement}\n\n"
+                f"## Semantic Model\n{semantic or '(empty)'}\n\n"
+                f"## Procedural Model\n{procedural or '(empty)'}\n\n"
+                f"## Samples ({sample_count})\n{sample_listing}\n\n"
+                f"## Catalog ({catalog_count} files)\n{catalog_listing}"
+            )
+
+            response_text = await self.llm.generate(prompt=user_msg, system=system_prompt)
+            llm_section = response_text or "(LLM produced empty report)"
+
+            report_text = (
+                "# Strategy Report\n\n"
+                f"{blocked_header}"
+                "## Universe (read FIRST — drives the gate decision)\n\n"
+                f"{universe_header}\n"
+                "## LLM Summary\n\n"
+                f"{llm_section}\n"
+            )
+        except Exception as e:
+            logger.warning(f"strategy_report generation failed: {e}")
+            report_text = (
+                f"# Strategy Report (generation failed)\n\n"
+                f"Recon completed but the LLM call to summarize failed: {e}\n\n"
+                f"Read the World Model directly via "
+                f"`read_world_model` or query the DB for context."
+            )
+
+        report_path = run_dir / "strategy_report.md"
+        report_path.write_text(report_text, encoding="utf-8")
+        logger.info(f"Strategy report written to {report_path}")
 
     # ── Microcompact ─────────────────────────────────────
 

@@ -25,7 +25,12 @@ class Config:
     LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
     LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-chat")
-    VISION_LLM_MODEL: str = os.getenv("VISION_LLM_MODEL", "kimi-k2.5")
+    # Vision model for browse(visual=True). Default Doubao-Seed-2.0-pro:
+    # verified 2026-05-28 on company gateway — only model that returned a
+    # concrete answer ("Red") on a 64x64 red-square test, with thinking
+    # mode supplying a full reasoning chain. Was kimi-k2.5 (text-only,
+    # always 400'd on image_url) until 2026-05-28.
+    VISION_LLM_MODEL: str = os.getenv("VISION_LLM_MODEL", "Doubao-Seed-2.0-pro")
 
     # ── Database ─────────────────────────────────────────
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
@@ -36,11 +41,6 @@ class Config:
 
     # ── Artifacts ────────────────────────────────────────
     ARTIFACTS_DIR: Path = Path(os.getenv("ARTIFACTS_DIR", "./artifacts"))
-
-    # ── Feature gates ────────────────────────────────────
-    VERIFICATION_SUBAGENT_ENABLED: bool = (
-        os.getenv("VERIFICATION_SUBAGENT_ENABLED", "true").lower() == "true"
-    )
 
     # ── Safety net (Planner) ─────────────────────────────
     MAX_PLANNER_TOOL_CALLS: int = int(os.getenv("MAX_PLANNER_TOOL_CALLS", "200"))

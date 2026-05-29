@@ -96,6 +96,14 @@ class LLMResponse:
             ]
         # Always emit reasoning_content — required-non-empty by thinking-mode APIs.
         msg["reasoning_content"] = self.reasoning if self.reasoning else "(no thinking captured)"
+        # Providers (e.g. deepseek) reject assistant messages with neither
+        # content nor tool_calls — "Invalid assistant message: content or
+        # tool_calls must be set". Happens when thinking-mode model produces
+        # only reasoning. Inject placeholder content so the message is legal
+        # in history. Confirmed 2026-05-28 — 66rpg recon→harvest hang was
+        # recording_agent.stop() looping over malformed messages.
+        if "content" not in msg and "tool_calls" not in msg:
+            msg["content"] = "(empty turn)"
         return msg
 
 
@@ -153,8 +161,9 @@ class LLMClient:
         self._client = AsyncOpenAI(
             api_key=Config.LLM_API_KEY,
             base_url=Config.LLM_BASE_URL,
-            timeout=120.0,
-            max_retries=2,  # SDK-level retries for transient network errors
+            timeout=240.0,
+            max_retries=8,  # SDK-level retries — long-run harvest can hit gateway
+                            # TPM throttling; 8 retries cover ~minutes of backoff
         )
         self.usage = UsageTracker()
 
@@ -226,7 +235,7 @@ class LLMClient:
     ) -> str | None:
         """Vision model call for browse visual mode.
 
-        Uses VISION_LLM_MODEL (kimi-k2.5) to describe a screenshot.
+        Uses VISION_LLM_MODEL (default Doubao-Seed-2.0-pro) to describe a screenshot.
         """
         messages = [
             {

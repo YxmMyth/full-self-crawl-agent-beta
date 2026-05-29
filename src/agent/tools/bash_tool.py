@@ -58,6 +58,7 @@ TOOL_PARAMETERS = {
         },
     },
     "required": ["command"],
+    "additionalProperties": False,
 }
 
 _MAX_OUTPUT = 30000  # chars
@@ -67,8 +68,24 @@ _AUTO_SAVE_THRESHOLD = 30000
 
 
 async def handle(ctx: Any, **kwargs: Any) -> str:
-    command: str = kwargs.get("command", "")
-    timeout_ms: int = kwargs.get("timeout", _DEFAULT_TIMEOUT_MS)
+    # Defensive: deepseek-v4-pro occasionally serializes bool/None where a
+    # string is expected. Coerce or fail with a clear message instead of an
+    # AttributeError from .strip().
+    raw_command = kwargs.get("command", "")
+    if not isinstance(raw_command, str):
+        return (
+            f"Error: 'command' must be a string, got {type(raw_command).__name__}: "
+            f"{raw_command!r}"
+        )
+    command: str = raw_command
+
+    # Defensive: LLM occasionally passes timeout as a string ("60000") or junk
+    # despite the schema declaring integer. Coerce here so `min(...)` below
+    # doesn't blow up with `'<' not supported between instances of int and str`.
+    try:
+        timeout_ms = int(kwargs.get("timeout") or _DEFAULT_TIMEOUT_MS)
+    except (TypeError, ValueError):
+        timeout_ms = _DEFAULT_TIMEOUT_MS
 
     if not command.strip():
         return "Error: empty command"

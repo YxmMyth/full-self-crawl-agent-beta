@@ -1,0 +1,154 @@
+"""mark_done — harvest agent claims mission complete.
+
+Triggers the harvest LLM audit (src/harvest/audit.py). The audit loads
+mission-specific criteria from workspace/checklist.md (compiled by the
+launcher at mission start) and evaluates each against actual on-disk
+evidence. On overall=PASS, sets ctx._mission_done. On BLOCKED, returns
+per-criterion feedback.
+
+This replaces the previous bash-checklist mechanism (deleted in 0993590).
+The mistake there was deleting the checklist artifact too — agent lost
+the "I know what done means" anchor. Restored 2026-05-25: checklist.md
+keeps criterion descriptions (no bash), audit reads them at verify time.
+
+Tamper resistance: the launcher pins sha256(checklist.md) onto ctx. We
+verify the on-disk file matches before invoking the audit — any edit
+fails the mission immediately, with a clear "you can't edit the
+acceptance contract" message.
+
+Requires the following attribute on ctx (attached by harvest launcher):
+  - ctx._domain             : the domain string
+  - ctx._llm                : LLMClient for the audit's generate() call
+  - ctx._requirement        : the requirement text the audit checks against
+  - ctx._checklist_sha256   : pinned hash for tamper detection
+
+See: src/harvest/audit.py + src/harvest/checklist.py.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+
+from src.config import Config
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+TOOL_NAME = "mark_done"
+TOOL_DESCRIPTION = (
+    "Claim the harvest mission is complete.\n\n"
+    "Triggers a two-phase audit:\n"
+    "  Phase 1 (mechanical): data/ has at least one file, total >1KB, "
+    "requirement.txt + workspace exist. Cheap, deterministic.\n"
+    "  Phase 2 (LLM): single audit call evaluates 6 qualitative criteria — "
+    "universe coverage, shape compliance, content quality, requirement fit, "
+    "reproducibility, error transparency. Sees the actual catalog universe, "
+    "the samples shape contract, and the on-disk listing of your data/ + "
+    "scripts + error logs.\n\n"
+    "Returns one of:\n"
+    "  - PASS: all 6 criteria verified against evidence → harvest ends.\n"
+    "  - BLOCKED: per-criterion verdict with evidence + actionable gaps → "
+    "you address the gaps and call mark_done again.\n\n"
+    "The `reason` you provide is one input to the audit — include concrete "
+    "evidence (counts, diff results, script names) the auditor can cross-"
+    "reference against the disk. Vague reasons get vague verdicts; concrete "
+    "ones get concrete PASS or precise FAIL."
+)
+TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "reason": {
+            "type": "string",
+            "description": (
+                "Concrete evidence summary the auditor can cross-reference: "
+                "what you produced (file counts, scope coverage), what's in "
+                "the data (sample content type, field set), how you "
+                "verified (commands you ran, their outputs). The auditor "
+                "compares your claim to the actual on-disk listing."
+            ),
+        },
+    },
+    "required": ["reason"],
+    "additionalProperties": False,
+}
+
+
+async def handle(ctx: Any, **kwargs: Any) -> str:
+    raw_reason = kwargs.get("reason", "")
+    if not isinstance(raw_reason, str):
+        return (
+            f"Error: 'reason' must be a string, got {type(raw_reason).__name__}: "
+            f"{raw_reason!r}"
+        )
+    reason: str = raw_reason.strip()
+    if not reason:
+        return "Error: mark_done requires a non-empty `reason`."
+
+    domain = getattr(ctx, "_domain", None)
+    if not domain:
+        return (
+            "Error: mark_done cannot run — ctx._domain missing. "
+            "This is a launcher bug, not your fault."
+        )
+    llm = getattr(ctx, "_llm", None)
+    if llm is None:
+        return (
+            "Error: mark_done cannot run — ctx._llm missing. "
+            "This is a launcher bug, not your fault."
+        )
+    requirement = getattr(ctx, "_requirement", "") or ""
+
+    # Tamper detection: launcher pinned the original checklist's sha256
+    # onto ctx (in-memory, agent cannot read or modify). If the file on
+    # disk no longer matches, agent has edited the acceptance contract —
+    # invariably a satisficing attempt — and we FAIL closed.
+    checklist_path = Config.run_dir(domain) / "workspace" / "checklist.md"
+    expected_hash = getattr(ctx, "_checklist_sha256", None)
+    if expected_hash and checklist_path.is_file():
+        current_hash = hashlib.sha256(checklist_path.read_bytes()).hexdigest()
+        if current_hash != expected_hash:
+            logger.warning(
+                f"mark_done: checklist tampered. "
+                f"expected={expected_hash[:16]}... current={current_hash[:16]}..."
+            )
+            return (
+                "VERIFICATION FAIL — checklist.md was modified after mission "
+                "start.\n\n"
+                "The checklist is the acceptance contract pinned at launch; "
+                "you cannot edit it. Editing it (even via apply_patch / bash) "
+                "is a satisficing attempt and will always FAIL.\n\n"
+                "If a criterion is genuinely wrong for the requirement, "
+                "satisfy what it actually says — the contract is the contract.\n\n"
+                f"Expected sha256: {expected_hash[:16]}...\n"
+                f"Current sha256:  {current_hash[:16]}...\n\n"
+                "To proceed: restore the original checklist content."
+            )
+
+    # Lazy import to avoid coupling this tool to harvest internals at import time
+    from src.harvest.audit import run_audit
+
+    result = await run_audit(
+        llm=llm,
+        domain=domain,
+        requirement=requirement,
+        mark_done_reason=reason,
+    )
+
+    if result.overall == "PASS":
+        ctx._mission_done = True
+        return (
+            f"VERIFICATION PASS — all 6 criteria verified against evidence.\n\n"
+            f"Agent reason recorded: {reason}\n\n"
+            f"Audit report written to verification/."
+        )
+
+    # BLOCKED — feed back specific gaps so agent can iterate
+    feedback = result.feedback()
+    return (
+        f"VERIFICATION BLOCKED — the mission is NOT yet complete.\n\n"
+        f"{feedback[:3000]}\n\n"
+        "Address the failing criteria's gaps (the evidence + reason fields "
+        "tell you what's missing), then call mark_done again with an updated "
+        "`reason` citing the new evidence."
+    )

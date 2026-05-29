@@ -284,6 +284,83 @@ async def list_observations_by_domain(
     return [_row_to_observation(r) for r in rows]
 
 
+async def get_observation_by_id(observation_id: int) -> Observation | None:
+    """Fetch one observation by primary key. Returns full raw, no truncation.
+
+    Used by the maintain_model agent's read_observation tool — agent needs
+    byte-exact verbatim text (browser_eval scripts etc.) to write reference
+    pointers rather than paraphrasing.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM observations WHERE id = $1", observation_id,
+        )
+    if row is None:
+        return None
+    return _row_to_observation(row)
+
+
+async def max_observation_id_for_domain(domain: str) -> int | None:
+    """Largest observation id under a domain (across all runs), or None if empty.
+
+    Caller snapshots this BEFORE a session runs, then passes to
+    maintain_and_summarize so the agent knows which obs ids are new
+    (id > snapshot = produced by this session).
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT MAX(o.id) AS max_id FROM observations o
+            JOIN locations l ON o.location_id = l.id
+            WHERE l.domain = $1
+            """,
+            domain,
+        )
+    return row["max_id"] if row and row["max_id"] is not None else None
+
+
+async def list_observations_since(
+    domain: str,
+    since_id: int | None,
+    run_id: str | None = None,
+) -> list[Observation]:
+    """Observations with id > since_id under a domain. since_id=None → all.
+
+    Default scope: current run. Pass run_id='*' for cross-run.
+    """
+    pool = _get_pool()
+    if run_id is None:
+        from src.config import Config
+        run_id = Config.RUN_ID or "*"
+
+    threshold = since_id if since_id is not None else -1
+
+    async with pool.acquire() as conn:
+        if run_id == "*":
+            rows = await conn.fetch(
+                """
+                SELECT o.* FROM observations o
+                JOIN locations l ON o.location_id = l.id
+                WHERE l.domain = $1 AND o.id > $2
+                ORDER BY o.id
+                """,
+                domain, threshold,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT o.* FROM observations o
+                JOIN locations l ON o.location_id = l.id
+                WHERE l.domain = $1 AND o.run_id = $2 AND o.id > $3
+                ORDER BY o.id
+                """,
+                domain, run_id, threshold,
+            )
+    return [_row_to_observation(r) for r in rows]
+
+
 # ── Sessions CRUD ────────────────────────────────────────
 
 
