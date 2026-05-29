@@ -1,5 +1,7 @@
 # Full-Self-Crawl Agent
 
+**English** | [中文](./README-CN.md)
+
 LLM-driven web reconnaissance + harvest agent. Give it a domain and a
 natural-language data requirement; it autonomously explores the site,
 maps its structure into a World Model, writes a reusable harvest script,
@@ -284,7 +286,7 @@ Design docs live under `docs/` and are organized by area:
 | `docs/部门部署架构_local-recon_server-harvest.md` | Deployment direction discussion |
 | `docs/agent_stress_test_candidates.md` | Candidate stress-test targets sourced from internal needs |
 
-A Chinese README is also available: `README-CN.md`.
+A Chinese README is also available: [README-CN.md](./README-CN.md).
 
 ---
 

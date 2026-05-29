@@ -1,5 +1,7 @@
 # Full-Self-Crawl Agent
 
+[English](./README.md) | **中文**
+
 LLM 驱动的"调研 + 采集"agent。给定 domain + 自然语言数据需求,agent 自动浏览
 站点、建立结构化 World Model、写可复用 crawler 脚本、产出数据集。
 
@@ -270,7 +272,7 @@ Agent 已在以下端点验证过:
 | `docs/部门部署架构_local-recon_server-harvest.md` | 部署方向讨论 |
 | `docs/agent_stress_test_candidates.md` | 来自内部需求的压测候选清单 |
 
-英文 README 在 `README.md`。
+英文 README 在 [README.md](./README.md)。
 
 ---
 
