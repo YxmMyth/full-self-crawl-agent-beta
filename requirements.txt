@@ -3,7 +3,16 @@ openai>=1.0.0
 
 # Browser
 camoufox>=0.4.11
-playwright>=1.40.0
+# PINNED to 1.59.0 on purpose. Playwright 1.60.0 introduced a regression: the
+# new webError.location() feature made the FF driver read pageError.location.url
+# without a null check, so a locationless page error (cross-origin "Script
+# error.", common when rendering untrusted third-party pages) throws inside the
+# driver's Node event loop and crashes the whole driver process —
+# unrecoverable ("Connection closed while reading from the driver"). 1.59.0 does
+# not read .location at all, so it is unaffected. Verified by diffing the
+# official v1.58/v1.59/v1.60 source. Re-evaluate once upstream ships the `?.` fix.
+# See docs/codepen_run_observations.md (I18).
+playwright==1.59.0
 
 # Database
 asyncpg>=0.29.0
@@ -21,6 +30,12 @@ ddgs>=9.0.0  # renamed from duckduckgo-search
 
 # Config
 python-dotenv>=1.0.0
+
+# Tool-call argument validation (ToolRegistry JSON Schema)
+jsonschema>=4.0.0
+
+# Process management (browser cleanup — orphaned parent.lock fix)
+psutil>=5.9.0
 
 # Dev / test
 pytest>=7.0.0

@@ -1,5 +1,25 @@
+# Secrets / local config
 .env
+.env.local
+*.key
+
+# Python
+.venv/
+venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime artifacts (per-domain run output + browser profiles)
 artifacts/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
