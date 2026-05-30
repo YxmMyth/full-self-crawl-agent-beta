@@ -39,6 +39,12 @@ class Config:
     BROWSER_WS_URL: str | None = os.getenv("BROWSER_WS_URL")
     BROWSER_CDP_URL: str | None = os.getenv("BROWSER_CDP_URL")
 
+    # ── Human assist ─────────────────────────────────────
+    # Max seconds a request_human_assist popup blocks before auto-returning
+    # status="timeout" so an unattended run doesn't hang forever. 0 / empty
+    # → wait forever (attended use). Default 600 (10 min).
+    HUMAN_ASSIST_TIMEOUT_S: float = float(os.getenv("HUMAN_ASSIST_TIMEOUT_S", "600"))
+
     # ── Artifacts ────────────────────────────────────────
     ARTIFACTS_DIR: Path = Path(os.getenv("ARTIFACTS_DIR", "./artifacts"))
 

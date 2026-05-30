@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.config import Config
+
 TOOL_NAME = "request_human_assist"
 TOOL_DESCRIPTION = (
     "Pause execution and request human intervention via the browser window. "
@@ -84,15 +86,33 @@ async def handle(ctx: Any, **kwargs: Any) -> dict:
             ),
         }
 
-    response = await gateway.request(reason=reason, page=ctx.page)
+    # Auto-timeout so an UNATTENDED run doesn't hang forever on the popup.
+    # >0 → cap the wait; <=0 → wait forever (attended use). See
+    # Config.HUMAN_ASSIST_TIMEOUT_S (env HUMAN_ASSIST_TIMEOUT_S, default 600s).
+    timeout_s = Config.HUMAN_ASSIST_TIMEOUT_S if Config.HUMAN_ASSIST_TIMEOUT_S > 0 else None
+    response = await gateway.request(reason=reason, page=ctx.page, timeout_s=timeout_s)
+
+    # On timeout, steer the agent away from re-requesting (no one is there) and
+    # toward an autonomous fallback path.
+    if response.status == "timeout":
+        next_step_hint = (
+            "No human responded within the timeout — this run is effectively "
+            "unattended. Do NOT call request_human_assist again for the same "
+            "blocker. Find an autonomous path instead (a route that needs no "
+            "login/CAPTCHA), or if the requirement genuinely cannot be met "
+            "without human input, call mark_done(status='blocked', reason=...) "
+            "to end cleanly."
+        )
+    else:
+        next_step_hint = (
+            "Human assistance returned. The browser page state may have changed. "
+            "Call `browse` to re-observe the current page before your next action. "
+            "Do not assume the requested action succeeded — verify via the page content."
+        )
 
     # Model-facing result: structured + a hint pushing agent to re-observe
     return {
         "status": response.status,
         "human_message": response.message,
-        "next_step_hint": (
-            "Human assistance returned. The browser page state may have changed. "
-            "Call `browse` to re-observe the current page before your next action. "
-            "Do not assume the requested action succeeded — verify via the page content."
-        ),
+        "next_step_hint": next_step_hint,
     }

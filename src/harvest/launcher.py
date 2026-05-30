@@ -268,19 +268,21 @@ async def run_harvest(
 
     browser_manager = BrowserManager(domain=domain)
     browser_manager.gateway = TkinterPopupGateway()
-    # Harvest defaults to headless. Reasons:
-    # - Recon already established cookies/session (persistent profile),
-    #   harvest does not need login flow.
-    # - human_assist popup is OS-level Tkinter (always-on-top dialog),
-    #   independent of browser headedness — so popup still works.
-    # - Headed Camoufox launch in long-running sessions hits a Camoufox/
-    #   Playwright handshake stall (id:1 Browser.enable never receives ack
-    #   when WebGL force-enabled hits stuck GPU context state — observed
-    #   2026-05-25 svg run, reproduced minimal). Headless avoids GL init.
-    # If agent needs headed mid-mission (Cloudflare interactive challenge,
-    # visual debug), it can call browser_reset(headed=True) explicitly.
-    ctx = await browser_manager.launch(headed=False)
-    logger.info("Browser launched (headless), human_assist gateway = TkinterPopup")
+    # Harvest runs HEADED by default so request_human_assist (login / CAPTCHA)
+    # actually has a visible window for the operator to act in. The earlier
+    # headless default created a contradiction: the agent could pop a "log in
+    # via the browser" request, but with no visible window there was nothing to
+    # act in (codepen run 2026-05-30). Recon also runs headed, so this matches.
+    # Override with HARVEST_HEADLESS=1 for truly unattended/no-login missions.
+    # (Historical note: a Camoufox headed long-run handshake stall was seen on
+    # a 2026-05-25 svg run; if it recurs, set HARVEST_HEADLESS=1 or have the
+    # agent call browser_reset(headed=False) mid-mission.)
+    harvest_headless = os.getenv("HARVEST_HEADLESS", "0") == "1"
+    ctx = await browser_manager.launch(headed=not harvest_headless)
+    logger.info(
+        f"Browser launched (headless={harvest_headless}), "
+        f"human_assist gateway = TkinterPopup"
+    )
 
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
