@@ -185,7 +185,21 @@ class BrowserManager:
                 "(`pip show camoufox`), profile dir permissions, or disk space."
             )
 
-        self.ctx = ToolContext(pw_context=pw_context, tabs=[page])
+        if self.ctx is not None:
+            # Reuse the SAME ToolContext object across reset. The live
+            # AgentSession holds a reference to this object (bound once at
+            # session __init__); rebinding to a fresh ToolContext here would
+            # leave the session operating the killed browser — the dangling-ctx
+            # bug that sent browser_reset into a "Target closed" death loop
+            # (codepen run 2026-05-30, I19). Mutate fields in place instead.
+            self.ctx.pw_context = pw_context
+            self.ctx.tabs = [page]
+            self.ctx.active_tab_idx = 0
+            self.ctx.selector_map.clear()
+            self.ctx.previous_element_ids.clear()
+            self.ctx.clear_network()
+        else:
+            self.ctx = ToolContext(pw_context=pw_context, tabs=[page])
         # Re-attach human_assist gateway across launches/resets
         if self.gateway is not None:
             self.ctx.human_assist = self.gateway
@@ -235,7 +249,12 @@ class BrowserManager:
                     await tab.close()
                 except Exception:
                     pass
-            self.ctx = None
+            # Keep the ToolContext object alive (do NOT rebind to None) so a
+            # holder surviving across reset — the live AgentSession — keeps a
+            # valid reference; launch() refreshes its fields on relaunch. Empty
+            # the tabs so any access between close and the next launch fails
+            # loudly via the `page` property instead of touching a dead tab.
+            self.ctx.tabs = []
 
         if self._camoufox_ctx:
             try:
