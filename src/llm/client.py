@@ -10,11 +10,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError
+from jsonschema import Draft7Validator
 
 from src.config import Config
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Tool-call re-roll: how many EXTRA times to re-call the API when the model
+# returns tool_calls whose arguments don't satisfy the tool's own JSON Schema.
+# This is the model-AGNOSTIC fix for tool-call pollution: instead of pattern-
+# matching any specific model's leaked template tokens (DeepSeek's '｜DSML｜',
+# others differ), we treat "arguments fail the declared schema" as the universal
+# pollution signal and simply ask the model again. Intermittent pollution (~3%)
+# clears on a re-roll; a persistent failure (model genuinely misusing the tool)
+# survives all re-rolls and is passed through so the agent gets the real error.
+# 2 extra → 3 total attempts. See docs/codepen_run_observations.md (I11).
+_TOOLCALL_REROLLS = 2
 
 
 # ── Response types ───────────────────────────────────────
@@ -144,6 +156,58 @@ class UsageTracker:
         }
 
 
+# ── Tool-call schema validation (model-agnostic pollution guard) ──
+
+
+def _build_validators(tools: list[dict[str, Any]]) -> dict[str, Draft7Validator]:
+    """Compile a JSON Schema validator per tool from OpenAI tool definitions.
+
+    `tools` is the OpenAI-format list (function.name + function.parameters),
+    i.e. exactly what ToolRegistry.openai_schemas() produced. We validate
+    against the same schema the registry will, so passing here guarantees a
+    clean dispatch.
+    """
+    validators: dict[str, Draft7Validator] = {}
+    for t in tools:
+        fn = t.get("function") or {}
+        name = fn.get("name")
+        params = fn.get("parameters")
+        if name and isinstance(params, dict):
+            try:
+                validators[name] = Draft7Validator(params)
+            except Exception:
+                # Malformed schema — skip; this tool just won't be re-roll-guarded.
+                pass
+    return validators
+
+
+def _invalid_toolcalls(
+    resp: LLMResponse, validators: dict[str, Draft7Validator]
+) -> str | None:
+    """Return a short description of the FIRST tool_call whose args fail their
+    schema, or None if all tool_calls are valid.
+
+    This is the universal pollution signal: any model leaking template tokens,
+    stray keys, or wrong-typed values into arguments produces args that don't
+    match the declared schema — regardless of which model or what the leak
+    looks like. A tool with no known validator is treated as valid (we can't
+    judge it).
+    """
+    for tc in resp.tool_calls:
+        # _raw means the args weren't even valid JSON (parse fell back) —
+        # always a re-roll candidate.
+        if "_raw" in tc.arguments and len(tc.arguments) == 1:
+            return f"{tc.name}: arguments were not valid JSON"
+        v = validators.get(tc.name)
+        if v is None:
+            continue
+        errs = sorted(v.iter_errors(tc.arguments), key=lambda e: str(e.path))
+        if errs:
+            first = errs[0]
+            return f"{tc.name}: {first.message}"
+    return None
+
+
 # ── LLM Client ──────────────────────────────────────────
 
 
@@ -195,11 +259,37 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
 
-        raw = await self._call_with_retry(kwargs)
-        if raw is None:
-            return None
+        # Build per-tool validators from the schemas we were handed. These are
+        # the SAME schemas the ToolRegistry validates against at dispatch, so
+        # "valid here" == "will dispatch cleanly". Model-agnostic by construction.
+        validators = _build_validators(tools) if tools else {}
 
-        return self._parse_response(raw)
+        parsed: LLMResponse | None = None
+        for attempt in range(_TOOLCALL_REROLLS + 1):
+            raw = await self._call_with_retry(kwargs)
+            if raw is None:
+                return None
+            parsed = self._parse_response(raw)
+
+            bad = _invalid_toolcalls(parsed, validators)
+            if not bad:
+                return parsed
+
+            logger.warning(
+                f"Tool-call args failed schema (attempt {attempt + 1}/"
+                f"{_TOOLCALL_REROLLS + 1}): {bad}. Re-rolling.",
+                extra={"tool": "llm_client", "model": model},
+            )
+
+        # Re-rolls exhausted and still invalid. This is likely a genuine tool
+        # misuse rather than transient pollution — pass it through so the
+        # registry returns the schema error to the agent (which can then change
+        # approach), instead of looping forever here.
+        logger.error(
+            "Tool-call args still invalid after re-rolls; passing through to agent",
+            extra={"tool": "llm_client", "model": model},
+        )
+        return parsed
 
     # ── generate ─────────────────────────────────────────
 
