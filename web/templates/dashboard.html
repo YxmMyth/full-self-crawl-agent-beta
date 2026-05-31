@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Helmsman — {{ state.domain }}{% endblock %}
+
+{% block crumbs %}
+  <span class="crumbs">{{ state.domain }} · {{ state.run_id or '(run_id 待捕获)' }}</span>
+{% endblock %}
+
+{% block topbar_right %}
+  <span class="pill" x-data><span class="dot" :class="$store.d.connected ? 'live' : 'err'"></span>
+    <span x-text="$store.d.connected ? 'SSE 已连' : 'SSE 断开'">SSE</span></span>
+{% endblock %}
+
+{% block body %}
+<div class="wrap" x-data="dashboard()" x-init='boot({{ state|tojson }})'>
+
+  <!-- Phase stepper + live status -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="bd" style="display:flex; align-items:center; gap:22px; flex-wrap:wrap;">
+      <div class="stepper">
+        <template x-for="(s, i) in steps" :key="s.key">
+          <div style="display:flex; align-items:center;">
+            <div class="step" :class="stepClass(s.key)">
+              <span class="bub" x-text="stepClass(s.key)==='done' ? '✓' : (i+1)"></span>
+              <span x-text="s.label"></span>
+            </div>
+            <span class="line" :class="stepClass(s.key)==='done' ? 'done':''" x-show="i < steps.length-1"></span>
+          </div>
+        </template>
+      </div>
+      <div style="flex:1;"></div>
+      <div class="crumbs" style="font-family:var(--mono); color:var(--muted); font-size:12px;">
+        <span x-show="sessionId">session <b x-text="sessionId"></b> · </span>
+        <span x-show="counts.observations">obs <b x-text="counts.observations"></b> · </span>
+        阶段 <b x-text="phase"></b>
+      </div>
+      <button class="btn danger sm" @click="stop()" x-show="!done && phase!=='idle'">停止</button>
+    </div>
+  </div>
+
+  <!-- Human-assist banner (Phase 3 wires the real channel) -->
+  <div class="banner assist" x-show="assistPending" x-cloak>
+    <div class="grow">
+      <div class="ttl">⏸ 需要你介入</div>
+      <div x-text="assist.reason || '请在浏览器里完成所需操作。'"></div>
+    </div>
+    <span class="crumbs" x-show="assist.timeout_s">超时 <span x-text="assist.timeout_s"></span>s</span>
+    <span class="pill"><span class="dot warn"></span>Phase 3</span>
+  </div>
+
+  <!-- Gate banner -->
+  <div class="banner gate" x-show="gatePending" x-cloak>
+    <div class="grow">
+      <div class="ttl">⏸ 检查点:继续 harvest?</div>
+      <div x-show="!strategyLoaded" class="hint">正在加载 strategy_report.md …</div>
+      <div class="md" x-html="strategyHtml" style="max-height:220px; overflow-y:auto; margin-top:6px;"></div>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      <button class="btn primary" @click="gate('continue')">继续 ►</button>
+      <button class="btn" @click="gate('stop')">停止</button>
+    </div>
+  </div>
+
+  <!-- Done banner -->
+  <div class="banner" :class="done==='completed' ? 'done' : 'error'" x-show="done" x-cloak>
+    <div class="grow">
+      <div class="ttl" x-text="done==='completed' ? '✓ 任务结束' : (done==='killed' ? '■ 已停止' : '✗ 异常结束')"></div>
+      <div x-text="'outcome: ' + done"></div>
+    </div>
+    <a class="btn" href="/">返回</a>
+  </div>
+
+  <!-- 3-column grid -->
+  <div class="grid cols-3">
+
+    <!-- RECON -->
+    <div class="card">
+      <div class="hd">RECON <span class="count" x-text="counts.locations + ' loc'"></span></div>
+      <div class="bd">
+        <div class="stats" style="margin-bottom:14px;">
+          <div class="stat"><div class="k">locations</div><div class="v accent" x-text="counts.locations"></div></div>
+          <div class="stat"><div class="k">observations</div><div class="v" x-text="counts.observations"></div></div>
+          <div class="stat"><div class="k">sessions</div><div class="v" x-text="counts.sessions"></div></div>
+          <div class="stat"><div class="k">samples</div><div class="v" x-text="counts.samples"></div></div>
+        </div>
+        <div class="seclabel">Locations</div>
+        <div class="list" style="margin-bottom:14px;">
+          <template x-for="l in locations" :key="l.pattern">
+            <div class="item"><div class="loc-pat" x-text="l.pattern"></div>
+              <div class="sub" x-show="l.how_to_reach" x-text="l.how_to_reach"></div></div>
+          </template>
+          <div class="empty" x-show="!locations.length">暂无 location</div>
+        </div>
+        <div class="seclabel">Observation 流(实时 ↓)</div>
+        <div class="list">
+          <template x-for="o in observations" :key="o.id">
+            <div class="item">
+              <div class="top"><span class="badge" :class="o.obs_type" x-text="o.obs_type"></span>
+                <span class="id" x-text="'#'+o.id"></span></div>
+              <div class="txt" x-text="o.preview"></div>
+            </div>
+          </template>
+          <div class="empty" x-show="!observations.length">等待 observation…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HARVEST -->
+    <div class="card">
+      <div class="hd">HARVEST <span class="count" x-text="counts.data_files + ' files'"></span></div>
+      <div class="bd">
+        <template x-if="phase==='harvest' || counts.data_files>0 || done">
+          <div>
+            <div class="stats" style="margin-bottom:14px;">
+              <div class="stat"><div class="k">data files</div><div class="v accent" x-text="counts.data_files"></div></div>
+              <div class="stat"><div class="k">data size</div><div class="v" x-text="fmtBytes(counts.data_bytes)"></div></div>
+            </div>
+            <div class="seclabel">数据清单(workspace/data)</div>
+            <div class="list">
+              <template x-for="a in (artifacts.data || [])" :key="a.filename">
+                <div class="item"><div class="txt" x-text="a.filename"></div>
+                  <div class="sub" x-text="fmtBytes(a.size)"></div></div>
+              </template>
+              <div class="empty" x-show="!(artifacts.data || []).length">暂无数据文件</div>
+            </div>
+            <div x-show="audit" style="margin-top:14px;">
+              <div class="seclabel">Audit</div>
+              <div class="item"><span class="badge" :class="audit && audit.overall==='PASS' ? 'pass':'blocked'" x-text="audit && audit.overall"></span>
+                <div class="txt" style="margin-top:6px;" x-text="audit && audit.blocking_summary"></div></div>
+            </div>
+          </div>
+        </template>
+        <div class="empty" x-show="!(phase==='harvest' || counts.data_files>0 || done)">
+          harvest 未开始<br><span style="font-size:11px;">(recon→gate 通过后,或选 harvest 模式时启动)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIVE BROWSER + MODEL -->
+    <div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="hd">实时浏览器 <span class="count">VNC</span></div>
+        <div class="bd">
+          <div class="vncframe"><div class="ph">
+            <div style="font-size:28px; margin-bottom:8px;">🖥</div>
+            内嵌 noVNC 小屏<br>
+            <span style="font-size:11px;">Phase 2 接入(同源反代 /vnc/,可交互、可放大)</span>
+          </div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd">MODEL</div>
+        <div class="bd">
+          <div class="tabs">
+            <span class="tab" :class="modelTab==='semantic'?'on':''" @click="loadModel('semantic')">semantic</span>
+            <span class="tab" :class="modelTab==='procedural'?'on':''" @click="loadModel('procedural')">procedural</span>
+          </div>
+          <div class="md" x-html="modelHtml || '<div class=\'empty\'>点上面的标签加载模型</div>'" style="max-height:280px; overflow-y:auto;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LOG -->
+  <div class="card" style="margin-top:16px;">
+    <div class="hd">LOG(结构化尾巴) <span class="count" x-text="logs.length"></span></div>
+    <div class="bd">
+      <div class="logpanel" x-ref="logpanel">
+        <template x-for="(l, i) in logs" :key="i">
+          <div class="logline" :class="l.level"><span class="ts" x-text="l.ts"></span><span class="lvl" x-text="l.level"></span><span x-text="l.line"></span></div>
+        </template>
+        <div class="empty" x-show="!logs.length">等待日志…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="/static/js/dashboard.js" defer></script>
+{% endblock %}

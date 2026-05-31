@@ -37,6 +37,19 @@ jsonschema>=4.0.0
 # Process management (browser cleanup — orphaned parent.lock fix)
 psutil>=5.9.0
 
+# Web frontend (Helmsman operator console)
+# FastAPI + Uvicorn serve the console; Jinja2 renders the HTMX templates;
+# sse-starlette provides the EventSourceResponse for the live progress firehose;
+# python-multipart parses the launch form; aiofiles for file serving.
+# uvicorn[standard] bundles watchfiles (Phase 2 status watch) + websockets
+# (Phase 2 noVNC proxy). httpx (above) is reused for the noVNC reverse proxy.
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+jinja2>=3.1.0
+sse-starlette>=2.0.0
+python-multipart>=0.0.9
+aiofiles>=23.0.0
+
 # Dev / test
 pytest>=7.0.0
 pytest-asyncio>=0.21.0

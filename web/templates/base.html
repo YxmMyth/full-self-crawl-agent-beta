@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Helmsman{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/vendor/marked.min.js" defer></script>
+  <script src="/static/vendor/alpine.min.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="topbar">
+    <a class="brand" href="/"><span class="mark"></span>HELMSMAN</a>
+    {% block crumbs %}{% endblock %}
+    <span class="spacer"></span>
+    {% block topbar_right %}{% endblock %}
+  </div>
+  {% block body %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Helmsman — 发起任务{% endblock %}
+
+{% block topbar_right %}
+  {% if active.active %}
+    <a class="pill" href="/run"><span class="dot live"></span>运行中 · {{ active.domain }}</a>
+  {% else %}
+    <span class="pill"><span class="dot"></span>空闲</span>
+  {% endif %}
+{% endblock %}
+
+{% block body %}
+<div class="wrap narrow">
+
+  {% if active.active %}
+  <div class="banner gate">
+    <div class="grow">
+      <div class="ttl">已有任务在运行</div>
+      <div>{{ active.domain }} · {{ active.run_id }} · 阶段 {{ active.phase }}</div>
+    </div>
+    <a class="btn primary" href="/run">查看实时看板 →</a>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="hd">发起任务</div>
+    <div class="bd">
+      <form hx-post="/api/runs" hx-target="#formerr" hx-swap="innerHTML">
+        <div class="field">
+          <label>目标域名</label>
+          <input type="text" name="domain" placeholder="codepen.io" required>
+        </div>
+        <div class="field">
+          <label>需求(自由文本 — 任务边界)</label>
+          <textarea name="requirement" placeholder="采集 codepen.io 上 three.js 相关 pen 50 个,每个要 html / css / js 源码 + tags …"></textarea>
+          <div class="hint">harvest(从已有 run)模式下可留空,会读取该 run 的 requirement.txt。</div>
+        </div>
+
+        <hr class="divider">
+
+        <div class="field">
+          <label>模式</label>
+          <div class="opts">
+            <label class="opt"><input type="radio" name="mode" value="auto" checked> auto(recon→gate→harvest)</label>
+            <label class="opt"><input type="radio" name="mode" value="explore"> 仅 explore(只侦察)</label>
+            <label class="opt"><input type="radio" name="mode" value="harvest"> 仅 harvest</label>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label>检查点 gate</label>
+            <div class="opts">
+              <label class="opt"><input type="checkbox" name="gate" checked> 到检查点问我</label>
+            </div>
+            <div class="hint">不勾 = --no-gate,recon 结束直接进 harvest。</div>
+          </div>
+          <div class="field">
+            <label>浏览器</label>
+            <div class="opts">
+              <label class="opt"><input type="checkbox" name="headed" checked> headed(登录/验证码可见)</label>
+            </div>
+            <div class="hint">服务器上 headed 渲染到虚拟屏,Phase 2 可在右侧小屏看。</div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>从已有 run 做 harvest(可选)</label>
+          <select name="from_run">
+            <option value="">— 不指定(explore/auto 新建;harvest 取最新)—</option>
+            {% for r in recent_runs %}
+              <option value="{{ r.run_id }}">{{ r.domain }} / {{ r.run_id }}</option>
+            {% endfor %}
+          </select>
+          <div class="hint">选了它就是 harvest 模式,跑在该 run 已有的侦察成果上。</div>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:14px; margin-top:8px;">
+          <button class="btn primary" type="submit">发起任务 ►</button>
+          <span id="formerr"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:22px;">
+    <div class="hd">最近的 run <span class="count">{{ recent_runs|length }}</span></div>
+    <div class="bd">
+      {% if recent_runs %}
+        {% for r in recent_runs %}
+        <div class="runrow">
+          <span class="dot {{ 'ok' if r.has_models else '' }}"></span>
+          <div style="min-width:0; flex:1;">
+            <div><span class="dom">{{ r.domain }}</span> &nbsp; <span class="rid">{{ r.run_id }}</span></div>
+            <div class="req">{{ r.requirement or '(无 requirement.txt)' }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">还没有任何 run。发起一个任务开始。</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+{% endblock %}

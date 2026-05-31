@@ -420,6 +420,22 @@ async def get_session(session_id: str) -> Session | None:
     return _row_to_session(row)
 
 
+async def list_sessions_by_run(run_id: str) -> list[Session]:
+    """All sessions for a run, oldest first (read-only; used by the web console).
+
+    The recon/harvest engine only needs get_session() by id; the operator
+    dashboard wants the whole session list for a run to render the trajectory
+    timeline. Pure read — no engine code depends on it.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM sessions WHERE run_id = $1 ORDER BY started_at NULLS LAST, id",
+            run_id,
+        )
+    return [_row_to_session(r) for r in rows]
+
+
 # ── Models CRUD ──────────────────────────────────────────
 
 
