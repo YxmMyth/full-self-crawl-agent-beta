@@ -7,6 +7,12 @@
   <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/vendor/marked.min.js" defer></script>
+  <!-- Page scripts that register Alpine components (Alpine.data via the
+       alpine:init event) MUST load BEFORE alpine.min.js, or Alpine starts
+       before the component is registered and x-data fails ("dashboard is not
+       defined") — leaving a blank, non-interactive page. All deferred, so they
+       execute in document order. -->
+  {% block page_js %}{% endblock %}
   <script src="/static/vendor/alpine.min.js" defer></script>
   {% block head %}{% endblock %}
 </head>
