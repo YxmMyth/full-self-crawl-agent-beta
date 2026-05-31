@@ -26,7 +26,11 @@ document.addEventListener("alpine:init", () => {
     steps: [],
     // VNC mini-screen
     vncConnected: false, vncExpanded: false, vncUrl: "",
-    _vncBase: "/vnc/vnc_lite.html?path=vnc/websockify&autoconnect=true&resize=scale&reconnect=true&quality=6&compression=6&view_only=false",
+    // Full noVNC client (vnc.html), not vnc_lite: it honors resize=scale
+    // (local downscale so the whole 1280x900 desktop fits the mini-screen) and
+    // shows connection status instead of a silent black canvas. autoconnect
+    // skips the Connect dialog; path points at our same-origin WS proxy.
+    _vncBase: "/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=vnc/websockify&view_only=false",
     _es: null,
 
     boot(state) {
