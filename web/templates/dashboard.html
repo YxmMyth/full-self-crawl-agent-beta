@@ -28,10 +28,18 @@
         </template>
       </div>
       <div style="flex:1;"></div>
-      <div class="crumbs" style="font-family:var(--mono); color:var(--muted); font-size:12px;">
-        <span x-show="sessionId">session <b x-text="sessionId"></b> · </span>
-        <span x-show="counts.observations">obs <b x-text="counts.observations"></b> · </span>
-        阶段 <b x-text="phase"></b>
+      <div style="text-align:right;">
+        <div class="crumbs" style="font-family:var(--mono); color:var(--muted); font-size:12px;">
+          <span x-show="sessionId">session <b x-text="sessionId"></b> · </span>
+          <span x-show="step">step <b x-text="step"></b> · </span>
+          <span x-show="counts.observations">obs <b x-text="counts.observations"></b> · </span>
+          阶段 <b x-text="phase"></b>
+          <span x-show="heartbeatAge!=null" :style="heartbeatAge>10 ? 'color:var(--warn)' : 'color:var(--faint)'">
+            · 心跳 <span x-text="hbText()"></span></span>
+        </div>
+        <div class="crumbs" x-show="currentUrl" x-cloak
+             style="font-family:var(--mono); color:var(--faint); font-size:11px; max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+             x-text="currentUrl"></div>
       </div>
       <button class="btn danger sm" @click="stop()" x-show="!done && phase!=='idle'">停止</button>
     </div>
@@ -137,14 +145,28 @@
 
     <!-- LIVE BROWSER + MODEL -->
     <div>
-      <div class="card" style="margin-bottom:16px;">
-        <div class="hd">实时浏览器 <span class="count">VNC</span></div>
-        <div class="bd">
-          <div class="vncframe"><div class="ph">
-            <div style="font-size:28px; margin-bottom:8px;">🖥</div>
-            内嵌 noVNC 小屏<br>
-            <span style="font-size:11px;">Phase 2 接入(同源反代 /vnc/,可交互、可放大)</span>
-          </div></div>
+      <div class="card vnc-card" :class="vncExpanded ? 'vnc-expanded' : ''" style="margin-bottom:16px;">
+        <div class="hd">实时浏览器
+          <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+            <span class="dot" :class="vncConnected ? 'live' : ''"></span>
+            <button class="btn sm ghost" @click="toggleVnc()" x-text="vncConnected ? '断开' : '连接'"></button>
+            <button class="btn sm ghost" @click="toggleExpand()" x-text="vncExpanded ? '收起 ✕' : '⛶ 放大'"></button>
+          </span>
+        </div>
+        <div class="bd" style="padding:0;">
+          <div class="vncframe" :style="vncExpanded ? 'height:calc(100vh - 110px)' : ''">
+            <template x-if="vncConnected">
+              <iframe :src="vncUrl" class="vnc-iframe" :style="vncExpanded ? 'height:100%' : ''"
+                      allow="clipboard-read; clipboard-write"></iframe>
+            </template>
+            <template x-if="!vncConnected">
+              <div class="ph">
+                <div style="font-size:28px; margin-bottom:8px;">🖥</div>
+                点"连接"查看实时浏览器(可交互)<br>
+                <span style="font-size:11px;">需服务器显示栈在跑:<code>scripts/server_display.sh start</code></span>
+              </div>
+            </template>
+          </div>
         </div>
       </div>
       <div class="card">

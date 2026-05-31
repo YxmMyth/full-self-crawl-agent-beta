@@ -20,6 +20,7 @@ source; the log-based inference stays as the fallback.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -30,6 +31,8 @@ from web.config import WebConfig
 from web.models import (
     ActiveRunState,
     ArtifactEvent,
+    AssistPendingEvent,
+    AuditEvent,
     Counts,
     DoneEvent,
     GatePendingEvent,
@@ -91,6 +94,8 @@ class RunSupervisor:
         self._obs_count: int = 0
         self._seen_locations: set[str] = set()
         self._seen_sessions: dict[str, Optional[str]] = {}
+        self._seen_audits: set[str] = set()
+        self._status_json: dict = {}  # last-read status.json snapshot
 
     # ── Public API ───────────────────────────────────────
 
@@ -340,7 +345,68 @@ class RunSupervisor:
         for ch in self.artifacts.diff_new_files(domain, run_id):
             self.bus.publish(ArtifactEvent(**ch))
 
+        # status.json — authoritative phase/step/url + flags when present.
+        self._read_status_json(domain, run_id)
+        # audit verdicts (harvest)
+        self._emit_new_audits(domain, run_id)
+
         self._emit_status(domain=domain, run_id=run_id, sessions=sessions)
+
+    def _read_status_json(self, domain: str, run_id: str) -> None:
+        """Read run_dir/status.json; let it override phase + flags, and publish
+        gate/assist transitions. Falls back silently if absent (log inference
+        from _inspect_line stays in effect)."""
+        p = WebConfig.run_dir(domain, run_id) / "status.json"
+        if not p.is_file():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        self._status_json = data
+
+        phase = data.get("phase")
+        if phase:
+            self._phase = phase
+
+        new_gate = bool(data.get("gate_pending"))
+        if new_gate and not self._gate_pending:
+            self.bus.publish(GatePendingEvent(pending=True))
+        self._gate_pending = new_gate
+
+        new_assist = bool(data.get("assist_pending"))
+        if new_assist != self._assist_pending:
+            self.bus.publish(
+                AssistPendingEvent(
+                    pending=new_assist,
+                    uuid=data.get("assist_uuid"),
+                    reason=data.get("assist_reason"),
+                    timeout_s=data.get("assist_timeout_s"),
+                )
+            )
+        self._assist_pending = new_assist
+
+    def _emit_new_audits(self, domain: str, run_id: str) -> None:
+        """Publish AuditEvent for any new verification/audit_round_N.json."""
+        verif = WebConfig.run_dir(domain, run_id) / "verification"
+        if not verif.is_dir():
+            return
+        for f in sorted(verif.glob("audit_round_*.json")):
+            if f.name in self._seen_audits:
+                continue
+            self._seen_audits.add(f.name)
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            m = re.search(r"audit_round_(\d+)", f.name)
+            self.bus.publish(
+                AuditEvent(
+                    round=int(m.group(1)) if m else 1,
+                    overall=data.get("overall", ""),
+                    blocking_summary=data.get("blocking_summary", ""),
+                )
+            )
 
     def _emit_status(
         self, domain: str | None = None, run_id: str | None = None, sessions=None
@@ -361,12 +427,21 @@ class RunSupervisor:
                 counts.data_bytes = fs.get("data_bytes", 0)
             except Exception:
                 pass
-        last_session = sessions[-1].id if sessions else None
+        sj = self._status_json
+        step = sj.get("step")
+        current_url = sj.get("current_url")
+        heartbeat_age = None
+        if sj.get("updated_at"):
+            heartbeat_age = max(0.0, time.time() - float(sj["updated_at"]))
+        session_id = sj.get("session_id") or (sessions[-1].id if sessions else None)
         self.bus.publish(
             StatusEvent(
                 phase=self._phase,
-                session_id=last_session,
+                session_id=session_id,
+                step=step,
+                current_url=current_url,
                 counts=counts,
+                heartbeat_age=heartbeat_age,
                 gate_pending=self._gate_pending,
                 assist_pending=self._assist_pending,
             )
@@ -406,6 +481,8 @@ class RunSupervisor:
         self._obs_count = 0
         self._seen_locations = set()
         self._seen_sessions = {}
+        self._seen_audits = set()
+        self._status_json = {}
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)

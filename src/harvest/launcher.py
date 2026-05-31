@@ -50,6 +50,7 @@ from src.config import Config
 from src.harvest.checklist import compile_checklist
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
+from src.runtime import status_hook
 from src.runtime.human_assist import TkinterPopupGateway
 from src.utils.logging import get_logger
 from src.world_model import db
@@ -263,6 +264,11 @@ async def run_harvest(
     # Ensure subdirs exist (recon should have made them, but be defensive)
     for sub in ["workspace", "verification"]:
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
+
+    # Point the web-console status hook at this run + mark harvest phase
+    # (no-op unless HELMSMAN_RUN=1).
+    status_hook.configure(run_dir, domain=domain, run_id=Config.RUN_ID)
+    status_hook.set_phase("harvest")
 
     await db.connect()
     logger.info("Database connected")

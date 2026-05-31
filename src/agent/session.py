@@ -20,6 +20,7 @@ from src.agent.tools.registry import ToolRegistry
 from src.browser.context import ToolContext
 from src.config import Config
 from src.llm.client import LLMClient, LLMResponse
+from src.runtime import status_hook
 from src.utils.logging import get_logger
 from src.world_model import db
 
@@ -476,6 +477,13 @@ class AgentSession:
 
                 # Take screenshot
                 await self._take_screenshot()
+
+                # Heartbeat for the web console (no-op unless HELMSMAN_RUN=1)
+                status_hook.heartbeat(
+                    session_id=self.session_id,
+                    step=self.step,
+                    current_url=(self.ctx.page.url if self.ctx.tabs else None),
+                )
 
                 # Anomaly detection
                 self._check_anomalies(tc, result)

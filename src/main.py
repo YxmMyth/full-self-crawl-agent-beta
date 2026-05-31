@@ -36,6 +36,7 @@ from src.config import Config
 from src.llm.client import LLMClient
 from src.planner.recon_planner import ReconPlanner
 from src.recording.agent import RecordingAgent
+from src.runtime import status_hook
 from src.runtime.human_assist import TkinterPopupGateway
 from src.utils.logging import setup, get_logger
 from src.world_model import db
@@ -71,6 +72,10 @@ async def run_explore(domain: str, requirement: str) -> None:
     (run_dir / "requirement.txt").write_text(requirement, encoding="utf-8")
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Run dir: {run_dir}")
+
+    # Point the web-console status hook at this run (no-op unless HELMSMAN_RUN=1)
+    status_hook.configure(run_dir, domain=domain, run_id=run_id)
+    status_hook.set_phase("recon")
 
     # Initialize components
     await db.connect()
@@ -146,9 +151,14 @@ async def run_auto(domain: str, requirement: str, no_gate: bool) -> None:
 
     # Phase 2: human gate between recon and harvest
     if not no_gate:
+        # Flag the gate as pending BEFORE the blocking read so the web console
+        # can render the gate banner (no-op unless HELMSMAN_RUN=1).
+        status_hook.set_phase("gate", gate_pending=True)
         decision = ask_continue_to_harvest(domain)
+        status_hook.set_flag(gate_pending=False)
         if decision == "stop":
             logger.info("Operator chose to stop after recon. Skipping harvest.")
+            status_hook.set_phase("done")
             return
         if decision == "edit":
             new_req = open_requirement_for_edit(domain)

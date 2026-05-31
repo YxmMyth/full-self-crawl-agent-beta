@@ -232,9 +232,19 @@ textarea { resize: vertical; min-height: 84px; line-height: 1.5; }
 .tab { padding: 5px 12px; border-radius: 7px; font-size: 12px; cursor: pointer; color: var(--muted); border: 1px solid transparent; }
 .tab.on { color: var(--accent); background: var(--surface-2); border-color: var(--border-solid); }
 
-/* ── VNC frame (Phase 2 placeholder) ─────────────── */
-.vncframe { background: #05080d; border: 1px solid var(--border-solid); border-radius: var(--radius-sm); height: 300px; display: grid; place-items: center; color: var(--faint); text-align: center; font-size: 12.5px; overflow: hidden; }
+/* ── VNC frame (live noVNC iframe) ───────────────── */
+.vncframe { background: #05080d; border-radius: var(--radius-sm); height: 300px; display: grid; place-items: center; color: var(--faint); text-align: center; font-size: 12.5px; overflow: hidden; }
 .vncframe .ph { padding: 20px; }
+.vnc-iframe { width: 100%; height: 300px; border: 0; display: block; background: #000; }
+/* Fullscreen: the whole card becomes a fixed overlay; controls stay reachable
+   in the header. ESC or the 收起 button exits (see dashboard.js). */
+.vnc-card.vnc-expanded {
+  position: fixed; inset: 0; z-index: 10000; margin: 0 !important;
+  border-radius: 0; border: none; box-shadow: none;
+  display: flex; flex-direction: column;
+}
+.vnc-card.vnc-expanded > .bd { flex: 1; }
+.vnc-card.vnc-expanded .vncframe { height: 100%; border-radius: 0; }
 
 /* ── Recent runs ─────────────────────────────────── */
 .runrow { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); margin-bottom: 8px; }

@@ -14,7 +14,7 @@ document.addEventListener("alpine:init", () => {
     // identity
     domain: "", runId: null, mode: "auto",
     // live status
-    phase: "idle", step: null, sessionId: null, currentUrl: null,
+    phase: "idle", step: null, sessionId: null, currentUrl: null, heartbeatAge: null,
     counts: { locations: 0, observations: 0, sessions: 0, samples: 0, catalog: 0, data_files: 0, data_bytes: 0 },
     // flags
     gatePending: false, assistPending: false, assist: {}, done: null,
@@ -24,6 +24,9 @@ document.addEventListener("alpine:init", () => {
     // panels
     modelTab: null, modelHtml: "", strategyHtml: "", strategyLoaded: false,
     steps: [],
+    // VNC mini-screen
+    vncConnected: false, vncExpanded: false, vncUrl: "",
+    _vncBase: "/vnc/vnc_lite.html?path=vnc/websockify&autoconnect=true&resize=scale&reconnect=true&quality=6&compression=6&view_only=false",
     _es: null,
 
     boot(state) {
@@ -35,6 +38,10 @@ document.addEventListener("alpine:init", () => {
       this.gatePending = !!state.gate_pending;
       this.assistPending = !!state.assist_pending;
       this.steps = this._stepsFor(this.mode);
+      // ESC exits VNC fullscreen.
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && this.vncExpanded) this.vncExpanded = false;
+      });
       this.connect();
     },
 
@@ -74,6 +81,7 @@ document.addEventListener("alpine:init", () => {
         if (d.step != null) this.step = d.step;
         if (d.current_url) this.currentUrl = d.current_url;
         if (d.counts) this.counts = d.counts;
+        this.heartbeatAge = (d.heartbeat_age == null ? null : d.heartbeat_age);
         this.gatePending = !!d.gate_pending;
         this.assistPending = !!d.assist_pending;
       });
@@ -96,7 +104,12 @@ document.addEventListener("alpine:init", () => {
         if (i >= 0) arr[i] = d; else arr.push(d);
       });
       on("gate_pending", () => { this.gatePending = true; this.phase = "gate"; this.loadStrategy(); });
-      on("assist_pending", (d) => { this.assistPending = !!d.pending; this.assist = d || {}; });
+      on("assist_pending", (d) => {
+        this.assistPending = !!d.pending;
+        this.assist = d || {};
+        // Surface the live browser so the operator can act on the gate.
+        if (d.pending) { if (!this.vncConnected) this.toggleVnc(); this.vncExpanded = true; }
+      });
       on("audit", (d) => { this.audit = d; });
       on("log", (d) => {
         this.logs.push(d);
@@ -168,7 +181,29 @@ document.addEventListener("alpine:init", () => {
       } catch (e) {}
     },
 
+    // ── VNC mini-screen ──
+    toggleVnc() {
+      if (this.vncConnected) {
+        this.vncConnected = false;
+        this.vncUrl = "";          // unload iframe → VNC live only while viewing
+      } else {
+        this.vncUrl = this._vncBase;
+        this.vncConnected = true;
+      }
+    },
+    toggleExpand() {
+      if (!this.vncConnected) this.toggleVnc();
+      this.vncExpanded = !this.vncExpanded;
+    },
+
     // ── format ──
+    hbText() {
+      const a = this.heartbeatAge;
+      if (a == null) return "";
+      if (a < 2) return "活跃";
+      if (a < 60) return Math.round(a) + "s 前";
+      return Math.round(a / 60) + "m 前";
+    },
     fmtBytes(n) {
       n = n || 0;
       if (n < 1024) return n + " B";

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,6 +29,7 @@ from web.config import WebConfig
 from web.services.artifacts import ArtifactService
 from web.services.db_read import DbReadService
 from web.services.eventbus import EventBus
+from web.services.novnc_proxy import NoVncProxy
 from web.services.supervisor import RunSupervisor
 
 logger = get_logger("helmsman.app")
@@ -46,15 +47,18 @@ async def lifespan(app: FastAPI):
     bus = EventBus()
     arts = ArtifactService()
     sup = RunSupervisor(bus, DbReadService(), arts)
+    vnc = NoVncProxy()
     app.state.bus = bus
     app.state.artifacts = arts
     app.state.supervisor = sup
+    app.state.vnc = vnc
 
     logger.info(f"Helmsman ready on http://{WebConfig.HOST}:{WebConfig.PORT}")
     try:
         yield
     finally:
         await sup.stop()
+        await vnc.aclose()
         await db.close()
         logger.info("Helmsman shut down")
 
@@ -95,3 +99,19 @@ async def run_dashboard(request: Request):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+# ── noVNC reverse proxy (same-origin → only one SSH tunnel) ──────────
+# Both routes proxy to websockify on 127.0.0.1:6080 (the display stack). Serving
+# them under Helmsman's own origin makes the embedded iframe same-origin (no
+# CORS) and means the operator forwards only port 8000.
+
+
+@app.websocket("/vnc/websockify")
+async def vnc_websockify(websocket: WebSocket):
+    await websocket.app.state.vnc.relay_ws(websocket)
+
+
+@app.get("/vnc/{path:path}")
+async def vnc_assets(request: Request, path: str):
+    return await request.app.state.vnc.proxy_http(request, path)
