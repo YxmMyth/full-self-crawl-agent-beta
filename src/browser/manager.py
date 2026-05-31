@@ -368,6 +368,7 @@ class BrowserManager:
         no separate Browser object.
         """
         from camoufox.async_api import AsyncCamoufox
+        from camoufox.addons import DefaultAddons
 
         # Tier 3: clean stale volatile state (parent.lock, sessionstore-*) so a
         # prior unclean shutdown can't make this launch hang at session restore.
@@ -387,6 +388,14 @@ class BrowserManager:
             "user_data_dir": str(self.profile_dir),
             "viewport": DEFAULT_VIEWPORT,
             "firefox_user_prefs": SESSION_RESTORE_OFF,
+            # Don't load the default uBlock Origin addon. Camoufox fetches UBO
+            # from addons.mozilla.org at launch; on networks that can't reach
+            # AMO (e.g. the CN server returns 451) the launch HARD-FAILS with
+            # "InvalidAddonPath: manifest.json is missing" before the browser
+            # ever starts. A recon/data agent has no use for an ad blocker, so
+            # excluding it removes a fragile external dependency. Camoufox-native
+            # param; harmless where AMO is reachable. (codepen CN deploy 2026-05-31)
+            "exclude_addons": [DefaultAddons.UBO],
         }
         if self._proxy:
             kwargs["proxy"] = {"server": self._proxy}
