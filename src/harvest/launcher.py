@@ -16,6 +16,7 @@ See: CLAUDE.md §一 系统概述
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from pathlib import Path
