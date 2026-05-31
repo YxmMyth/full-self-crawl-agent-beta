@@ -51,7 +51,7 @@ from src.harvest.checklist import compile_checklist
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
 from src.runtime import status_hook
-from src.runtime.human_assist import TkinterPopupGateway
+from src.runtime.human_assist import TkinterPopupGateway, WebGateway
 from src.utils.logging import get_logger
 from src.world_model import db
 
@@ -274,7 +274,13 @@ async def run_harvest(
     logger.info("Database connected")
 
     browser_manager = BrowserManager(domain=domain)
-    browser_manager.gateway = TkinterPopupGateway()
+    # Under the Helmsman web console (HELMSMAN_RUN=1) route human-assist through
+    # the WebGateway (signal files under workspace/, surfaced in the web UI);
+    # otherwise the always-on-top Tkinter desktop popup.
+    if os.getenv("HELMSMAN_RUN") == "1":
+        browser_manager.gateway = WebGateway(run_dir / "workspace")
+    else:
+        browser_manager.gateway = TkinterPopupGateway()
     # Harvest runs HEADED by default so request_human_assist (login / CAPTCHA)
     # actually has a visible window for the operator to act in. The earlier
     # headless default created a contradiction: the agent could pop a "log in

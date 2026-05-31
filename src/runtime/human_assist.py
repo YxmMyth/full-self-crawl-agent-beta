@@ -19,7 +19,10 @@ See conversation 2026-04-25 for full architectural rationale.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import time
+import uuid as uuid_mod
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -525,3 +528,134 @@ class TkinterPopupGateway(HumanAssistGateway):
 
         logger.info(f"Popup assist {response.status}")
         return response
+
+
+# ── Web gateway (Helmsman console) ───────────────────────────────────
+
+
+class WebGateway(HumanAssistGateway):
+    """Cross-process gateway for the Helmsman web console.
+
+    The agent runs in its own subprocess; the console is a separate process. An
+    asyncio.Future cannot cross that boundary, so this reuses TerminalGateway's
+    proven file-signal pattern, keyed by a per-request UUID:
+
+      1. write workspace/assist_request_{uuid}.json (durable record)
+      2. raise the request to the console via status.json (status_hook flags:
+         assist_pending / assist_reason / assist_uuid / assist_timeout_s) — the
+         supervisor already reads status.json and emits an SSE assist event
+      3. bring the browser to front so it's visible in the embedded noVNC screen
+      4. poll for workspace/assist_response_{uuid}.json (written by the console
+         when the operator clicks 完成 / 跳过)
+      5. consume both files, clear the status flags, return
+
+    Durability: the request file + status.json are on disk, so a console restart
+    or SSE reconnect re-surfaces a pending request. The signal file is the
+    contract; the SSE/WS layer is just the live transport on top.
+    """
+
+    POLL_INTERVAL_S = 1
+
+    def __init__(self, workspace_dir: Path | str) -> None:
+        self.workspace = Path(workspace_dir)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+
+    async def request(
+        self,
+        reason: str,
+        page: Any,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        # Lazy import to avoid a hard dependency cycle at module load.
+        from src.runtime import status_hook
+
+        req_id = uuid_mod.uuid4().hex[:12]
+        req_file = self.workspace / f"assist_request_{req_id}.json"
+        resp_file = self.workspace / f"assist_response_{req_id}.json"
+
+        # Clean any stale response from a prior identically-named request (the
+        # uuid makes a real collision astronomically unlikely; this is defensive).
+        for f in (req_file, resp_file):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+        # Durable request record.
+        try:
+            req_file.write_text(
+                json.dumps(
+                    {"uuid": req_id, "reason": reason, "created_at": time.time(),
+                     "timeout_s": timeout_s},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"WebGateway: failed to write request file: {e}")
+
+        # Raise to the console via status.json (no-op if HELMSMAN_RUN unset, but
+        # WebGateway is only ever selected when it IS set).
+        status_hook.set_flag(
+            assist_pending=True,
+            assist_reason=reason,
+            assist_uuid=req_id,
+            assist_timeout_s=timeout_s,
+        )
+
+        # Surface the browser so it shows in the embedded noVNC screen.
+        try:
+            if page is not None:
+                await page.bring_to_front()
+        except Exception:
+            pass
+
+        logger.info(f"Awaiting human assist (web): {reason[:80]} [{req_id}]")
+
+        try:
+            status = await self._poll_response(resp_file, timeout_s)
+        except asyncio.TimeoutError:
+            logger.warning(f"Web assist timed out after {timeout_s}s [{req_id}]")
+            status = "timeout"
+        except asyncio.CancelledError:
+            logger.warning(f"Web assist cancelled [{req_id}]")
+            status = "cancelled"
+
+        # Clear the console-facing flags + clean up signal files.
+        status_hook.set_flag(
+            assist_pending=False,
+            assist_reason=None,
+            assist_uuid=None,
+            assist_timeout_s=None,
+        )
+        for f in (req_file, resp_file):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+        logger.info(f"Web assist {status} [{req_id}]")
+        return HumanResponse(status=status)
+
+    async def _poll_response(
+        self, resp_file: Path, timeout_s: float | None
+    ) -> str:
+        """Poll for the response file. Returns the status string.
+
+        Response file content: {"status": "completed"|"cancelled", "message"?: ...}.
+        Raises asyncio.TimeoutError if timeout_s elapses first.
+        """
+        start = time.monotonic()
+        while True:
+            if resp_file.exists():
+                try:
+                    data = json.loads(resp_file.read_text(encoding="utf-8"))
+                    status = str(data.get("status", "completed"))
+                except Exception:
+                    status = "completed"  # file present but unreadable → treat as done
+                if status not in ("completed", "cancelled", "timeout"):
+                    status = "completed"
+                return status
+            if timeout_s is not None and (time.monotonic() - start) > timeout_s:
+                raise asyncio.TimeoutError()
+            await asyncio.sleep(self.POLL_INTERVAL_S)

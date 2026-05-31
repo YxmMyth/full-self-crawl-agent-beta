@@ -45,6 +45,8 @@ _state: dict[str, Any] = {
     "gate_pending": False,
     "assist_pending": False,
     "assist_reason": None,
+    "assist_uuid": None,
+    "assist_timeout_s": None,
     "updated_at": None,
 }
 _path: Optional[Path] = None

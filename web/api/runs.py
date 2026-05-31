@@ -74,6 +74,19 @@ async def gate_decision(request: Request, decision: str = Form(...)):
     return JSONResponse({"ok": ok})
 
 
+@router.post("/runs/active/assist")
+async def assist_answer(
+    request: Request,
+    uuid: str = Form(...),
+    status: str = Form("completed"),
+):
+    """Answer a pending human-assist request (operator clicked 完成 / 跳过)."""
+    ok = await _sup(request).answer_assist(
+        uuid.strip(), "cancelled" if status == "cancelled" else "completed"
+    )
+    return JSONResponse({"ok": ok})
+
+
 @router.get("/runs")
 async def list_runs(request: Request):
     return JSONResponse({"runs": request.app.state.artifacts.list_all_runs()})

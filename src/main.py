@@ -37,11 +37,24 @@ from src.llm.client import LLMClient
 from src.planner.recon_planner import ReconPlanner
 from src.recording.agent import RecordingAgent
 from src.runtime import status_hook
-from src.runtime.human_assist import TkinterPopupGateway
+from src.runtime.human_assist import TkinterPopupGateway, WebGateway
 from src.utils.logging import setup, get_logger
 from src.world_model import db
 
 logger = get_logger(__name__)
+
+
+def _select_gateway(run_dir):
+    """Pick the human-assist gateway for the current environment.
+
+    Under the Helmsman web console (env HELMSMAN_RUN=1) the run executes as a
+    subprocess with no visible desktop the operator can reach, so route assist
+    through the WebGateway (writes signal files under workspace/, surfaced in the
+    web UI). Otherwise use the always-on-top Tkinter desktop popup.
+    """
+    if os.getenv("HELMSMAN_RUN") == "1":
+        return WebGateway(run_dir / "workspace")
+    return TkinterPopupGateway()
 
 
 def build_execution_registry() -> ToolRegistry:
@@ -83,9 +96,12 @@ async def run_explore(domain: str, requirement: str) -> None:
 
     browser_manager = BrowserManager(domain=domain)
     # Set gateway BEFORE first launch so it auto-attaches to ctx and survives
-    # any subsequent browser_reset(). Tkinter desktop popup is the default —
-    # always-on-top regardless of which app the user is currently looking at.
-    browser_manager.gateway = TkinterPopupGateway()
+    # any subsequent browser_reset(). Under the Helmsman web console
+    # (HELMSMAN_RUN=1) use the WebGateway so human-assist surfaces in the
+    # browser UI (the operator can't see an OS-level Tk dialog over SSH);
+    # otherwise the Tkinter desktop popup is the default — always-on-top
+    # regardless of which app the user is currently looking at.
+    browser_manager.gateway = _select_gateway(run_dir)
     # Default headed (recon's human_assist relies on visible window). Override
     # via RECON_HEADLESS=1 when headed Camoufox launch hangs (Juggler/
     # removeProgressListener bug observed on Windows + Python 3.14 + recent

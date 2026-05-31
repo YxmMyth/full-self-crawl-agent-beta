@@ -154,6 +154,13 @@ document.addEventListener("alpine:init", () => {
       await fetch("/api/runs/active/gate", { method: "POST", body: fd });
       this.gatePending = false;
     },
+    async answerAssist(status) {
+      const fd = new FormData();
+      fd.append("uuid", this.assist.uuid || "");
+      fd.append("status", status);
+      await fetch("/api/runs/active/assist", { method: "POST", body: fd });
+      this.assistPending = false; // optimistic; status.json reconciles
+    },
     async stop() {
       if (!confirm("确定停止当前任务?")) return;
       await fetch("/api/runs/active/stop", { method: "POST" });

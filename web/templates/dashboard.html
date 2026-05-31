@@ -45,14 +45,18 @@
     </div>
   </div>
 
-  <!-- Human-assist banner (Phase 3 wires the real channel) -->
+  <!-- Human-assist banner: act in the live browser on the right, then click 完成 -->
   <div class="banner assist" x-show="assistPending" x-cloak>
     <div class="grow">
       <div class="ttl">⏸ 需要你介入</div>
-      <div x-text="assist.reason || '请在浏览器里完成所需操作。'"></div>
+      <div x-text="assist.reason || '请在右侧实时浏览器里完成所需操作。'"></div>
+      <div class="hint">在右侧"实时浏览器"小屏里直接操作(登录 / 验证码 / 点击),完成后点这里的"完成"。</div>
     </div>
     <span class="crumbs" x-show="assist.timeout_s">超时 <span x-text="assist.timeout_s"></span>s</span>
-    <span class="pill"><span class="dot warn"></span>Phase 3</span>
+    <div style="display:flex; gap:8px;">
+      <button class="btn primary" @click="answerAssist('completed')">完成 ✓</button>
+      <button class="btn" @click="answerAssist('cancelled')">跳过</button>
+    </div>
   </div>
 
   <!-- Gate banner -->

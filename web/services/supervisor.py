@@ -187,6 +187,31 @@ class RunSupervisor:
         self._emit_status()
         return True
 
+    async def answer_assist(self, req_uuid: str, status: str) -> bool:
+        """Answer a pending human-assist request by writing its response file.
+
+        The WebGateway in the mission subprocess polls for
+        workspace/assist_response_{uuid}.json. We write it here; the gateway
+        picks it up and clears assist_pending on its next status.json flush.
+        """
+        if not self.is_active or not self._domain or not self._run_id:
+            return False
+        if status not in ("completed", "cancelled"):
+            status = "completed"
+        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / f"assist_response_{req_uuid}.json").write_text(
+                json.dumps({"status": status}), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write assist response: {e}")
+            return False
+        # Optimistic local clear; the next status.json read reconciles truth.
+        self._assist_pending = False
+        self._emit_status()
+        return True
+
     # ── Subprocess argv ──────────────────────────────────
 
     def _build_argv(self, req: LaunchRunRequest) -> tuple[list[str], str]:
