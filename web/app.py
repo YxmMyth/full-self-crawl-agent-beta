@@ -35,6 +35,8 @@ from web.services.supervisor import RunSupervisor
 logger = get_logger("helmsman.app")
 
 templates = Jinja2Templates(directory=str(WebConfig.TEMPLATES_DIR))
+# Cache-busting token available to every template as {{ asset_v }}.
+templates.env.globals["asset_v"] = WebConfig.ASSET_VERSION
 
 
 @asynccontextmanager

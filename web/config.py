@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from src.config import Config as AgentConfig
@@ -18,6 +19,12 @@ from src.config import Config as AgentConfig
 
 class WebConfig:
     """Read-once config for the Helmsman web console."""
+
+    # Cache-busting token for static assets. Computed once at process start, so
+    # every Helmsman restart (which happens on every deploy) forces browsers to
+    # re-fetch CSS/JS instead of serving a stale cached copy — the cause of the
+    # "I deployed a fix but the browser still runs the old code" class of bugs.
+    ASSET_VERSION: str = str(int(time.time()))
 
     # ── Bind (locked to localhost — see module docstring) ────
     HOST: str = "127.0.0.1"
