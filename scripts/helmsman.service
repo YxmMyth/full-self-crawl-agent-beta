@@ -1,0 +1,43 @@
+# systemd unit for the Helmsman operator console — OPTIONAL but recommended.
+#
+# Without this, Helmsman runs in a tmux session and dies for good if the
+# process crashes or the server reboots (observed: it was found dead with no
+# auto-restart). This unit makes systemd keep it alive and start it on boot.
+#
+# Install (run once, as root, on the server):
+#   cp /mnt/data1/full-self-crawl-agent-beta/scripts/helmsman.service \
+#      /etc/systemd/system/helmsman.service
+#   # Make sure the display stack also starts on boot, e.g. add to the unit a
+#   # dependency, OR install a separate xvfb unit. Simplest: ExecStartPre below
+#   # brings the display stack up before Helmsman.
+#   systemctl daemon-reload
+#   systemctl enable --now helmsman
+#   systemctl status helmsman      # verify
+#   journalctl -u helmsman -f      # live logs
+#
+# Stop managing via systemd again:  systemctl disable --now helmsman
+#
+# NOTE: when systemd manages Helmsman, do NOT also start it via
+# scripts/helmsman.sh (they'd fight for the port). Pick one.
+
+[Unit]
+Description=Helmsman operator console (Full-Self-Crawl-Agent)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data1/full-self-crawl-agent-beta
+Environment=DISPLAY=:99
+Environment=HELMSMAN_PORT=8080
+# Bring the virtual display + VNC up first (idempotent).
+ExecStartPre=/usr/bin/bash /mnt/data1/full-self-crawl-agent-beta/scripts/server_display.sh start
+ExecStart=/mnt/data1/full-self-crawl-agent-beta/.venv/bin/python -m web
+Restart=on-failure
+RestartSec=5
+# Give in-flight mission subprocesses a moment on stop.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
