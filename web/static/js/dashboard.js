@@ -171,7 +171,7 @@ document.addEventListener("alpine:init", () => {
       this.modelHtml = "<div class='empty'>加载中…</div>";
       try {
         const r = await fetch(
-          `/api/runs/${encodeURIComponent(this.domain)}/${encodeURIComponent(this.runId)}/model?type=${type}`
+          `/api/runs/model?domain=${encodeURIComponent(this.domain)}&run_id=${encodeURIComponent(this.runId)}&type=${type}`
         );
         const j = await r.json();
         this.modelHtml = j.markdown ? marked.parse(j.markdown) : "<div class='empty'>(空)</div>";
@@ -183,7 +183,7 @@ document.addEventListener("alpine:init", () => {
       if (this.strategyLoaded || !this.runId) return;
       try {
         const r = await fetch(
-          `/api/runs/${encodeURIComponent(this.domain)}/${encodeURIComponent(this.runId)}/file?path=strategy_report.md`
+          `/api/runs/file?domain=${encodeURIComponent(this.domain)}&run_id=${encodeURIComponent(this.runId)}&path=strategy_report.md`
         );
         if (r.ok) {
           this.strategyHtml = marked.parse(await r.text());
