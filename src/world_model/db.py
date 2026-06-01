@@ -71,6 +71,17 @@ def _get_pool() -> asyncpg.Pool:
 # ── Locations CRUD ───────────────────────────────────────
 
 
+def _bare_pattern(domain: str, pattern: str) -> str:
+    """Strip any already-present ``domain::`` prefixes the LLM may have echoed
+    back, so we never build ``domain::domain::pattern``. Defensive, code-only —
+    deliberately does NOT touch prompts (changing those shifts LLM tendencies)."""
+    p = pattern.strip()
+    prefix = f"{domain}::"
+    while p.startswith(prefix):
+        p = p[len(prefix):]
+    return p
+
+
 async def create_location(
     domain: str,
     pattern: str,
@@ -86,6 +97,7 @@ async def create_location(
         from src.config import Config
         run_id = Config.RUN_ID or None
     pool = _get_pool()
+    pattern = _bare_pattern(domain, pattern)
     loc_id = f"{domain}::{pattern}"
     now = datetime.now(timezone.utc)
 
@@ -156,6 +168,7 @@ async def find_or_create_location(
 
     Used by Recording Agent's create_observation — auto find-or-create.
     """
+    pattern = _bare_pattern(domain, pattern)
     loc_id = f"{domain}::{pattern}"
     existing = await get_location(loc_id)
     if existing is not None:
