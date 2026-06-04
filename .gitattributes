@@ -1,0 +1,6 @@
+# Keep shell scripts + the container entrypoint LF-only. CRLF breaks bash inside
+# the Linux container ("/usr/bin/env: 'bash\r': No such file or directory").
+*.sh           text eol=lf
+*.Dockerfile   text eol=lf
+Dockerfile     text eol=lf
+docker/entrypoint.sh text eol=lf
