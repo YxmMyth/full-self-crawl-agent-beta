@@ -43,6 +43,19 @@ class WebConfig:
     # ── noVNC reverse proxy (Phase 2) ────────────────────
     NOVNC_UPSTREAM: str = os.getenv("HELMSMAN_NOVNC_UPSTREAM", "127.0.0.1:6080")
 
+    # ── Containerized run mode (option B) ────────────────
+    # HELMSMAN_CONTAINERIZED=1 → the supervisor launches each mission as a
+    # disposable `docker run` of RUN_IMAGE instead of a host python subprocess.
+    # The container carries its own browser + display stack; profiles + artifacts
+    # are bind-mounted; PostgreSQL is reached over the docker bridge. The
+    # container publishes its noVNC (:6080) to host NOVNC_HOST_PORT, which the
+    # existing static /vnc upstream (127.0.0.1:6080) already targets — so the
+    # single-serial path needs no proxy change (per-run dynamic ports are the
+    # later concurrency workstream).
+    CONTAINERIZED: bool = os.getenv("HELMSMAN_CONTAINERIZED", "0") == "1"
+    RUN_IMAGE: str = os.getenv("HELMSMAN_RUN_IMAGE", "fsc-run:dev")
+    NOVNC_HOST_PORT: int = int(os.getenv("HELMSMAN_NOVNC_HOST_PORT", "6080"))
+
     # ── Paths ────────────────────────────────────────────
     ARTIFACTS_DIR: Path = AgentConfig.ARTIFACTS_DIR
     WEB_DIR: Path = Path(__file__).resolve().parent

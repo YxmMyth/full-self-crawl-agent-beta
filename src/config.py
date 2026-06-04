@@ -100,15 +100,27 @@ class Config:
         return p
 
     @classmethod
-    def set_run_id(cls, requirement: str) -> str:
-        """Generate and set RUN_ID from requirement string + timestamp.
+    def make_run_id(cls, requirement: str) -> str:
+        """Compute (but don't set) a RUN_ID from requirement + timestamp.
 
-        Format: {YYYYMMDD-HHMM}_{requirement_slug_max_30_chars}
-        Returns the generated RUN_ID.
+        Format: {YYYYMMDD-HHMM}_{requirement_slug_max_30_chars}. Pure — lets a
+        caller (e.g. the Helmsman supervisor) generate the id host-side and
+        inject it into a containerized run via FSC_RUN_ID.
         """
         ts = time.strftime("%Y%m%d-%H%M", time.localtime())
         slug = _slugify(requirement, max_len=30)
-        cls.RUN_ID = f"{ts}_{slug}" if slug else ts
+        return f"{ts}_{slug}" if slug else ts
+
+    @classmethod
+    def set_run_id(cls, requirement: str) -> str:
+        """Generate and set RUN_ID from requirement string + timestamp.
+
+        Honors an injected FSC_RUN_ID (set by the containerized supervisor so the
+        host and the in-container mission agree on the run dir); otherwise
+        computes a fresh one. Returns the RUN_ID.
+        """
+        injected = os.getenv("FSC_RUN_ID")
+        cls.RUN_ID = injected if injected else cls.make_run_id(requirement)
         return cls.RUN_ID
 
 

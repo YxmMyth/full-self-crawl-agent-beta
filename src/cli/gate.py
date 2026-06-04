@@ -11,10 +11,13 @@ contract: show report, get decision, optionally edit requirement.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import time
 
 from src.config import Config
+from src.runtime import status_hook
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -49,6 +52,14 @@ def ask_continue_to_harvest(domain: str) -> str:
         print(f"\n[!] Strategy report missing at {report_path}")
         print("    Recon may have skipped report generation. Proceeding to ask anyway.")
 
+    # Helmsman path: no stdin (the mission may be a docker-run subprocess with
+    # no attached pipe). Raise gate_pending via status.json and poll for the
+    # operator's decision file — the same cross-process signal-file pattern the
+    # WebGateway uses for human-assist. The console writes gate_response.json
+    # (supervisor.answer_gate) when the operator clicks continue / stop.
+    if status_hook.enabled():
+        return _await_gate_via_console(run_dir)
+
     print("\n" + "-" * 60)
     while True:
         try:
@@ -64,6 +75,45 @@ def ask_continue_to_harvest(domain: str) -> str:
         if ans == "edit":
             return _DECISION_EDIT
         print("  Please answer y / N / edit.")
+
+
+def _await_gate_via_console(run_dir) -> str:
+    """Block until the Helmsman operator answers the gate (continue / stop).
+
+    Mirrors WebGateway: set status.json gate_pending=True, then poll
+    workspace/gate_response.json. Waits indefinitely — the gate is an explicit
+    human checkpoint (use --no-gate for unattended runs). Returns 'continue' or
+    'stop' ('edit' is not offered by the web console).
+    """
+    workspace = run_dir / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    resp_file = workspace / "gate_response.json"
+    try:
+        resp_file.unlink()
+    except FileNotFoundError:
+        pass
+
+    status_hook.set_flag(gate_pending=True)
+    logger.info("Gate raised to console; awaiting operator decision (continue/stop).")
+    try:
+        while True:
+            if resp_file.exists():
+                try:
+                    data = json.loads(resp_file.read_text(encoding="utf-8"))
+                    decision = str(data.get("decision", _DECISION_STOP))
+                except Exception:
+                    decision = _DECISION_STOP
+                if decision not in (_DECISION_CONTINUE, _DECISION_STOP, _DECISION_EDIT):
+                    decision = _DECISION_STOP
+                logger.info(f"Gate decision from console: {decision}")
+                return decision
+            time.sleep(1.0)
+    finally:
+        status_hook.set_flag(gate_pending=False)
+        try:
+            resp_file.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def open_requirement_for_edit(domain: str) -> str:

@@ -26,6 +26,7 @@ import re
 import time
 from typing import Optional
 
+from src.config import Config as AgentConfig
 from src.utils.logging import get_logger
 from web.config import WebConfig
 from web.models import (
@@ -76,6 +77,7 @@ class RunSupervisor:
         self.artifacts = artifacts
 
         self._proc: Optional[asyncio.subprocess.Process] = None
+        self._container_name: Optional[str] = None  # set when CONTAINERIZED
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
 
@@ -133,6 +135,23 @@ class RunSupervisor:
             env["RECON_HEADLESS"] = headless
             env["HARVEST_HEADLESS"] = headless
 
+            # Containerized (option B): wrap the mission in `docker run`. explore/
+            # auto get a host-generated run_id injected via FSC_RUN_ID so host and
+            # container agree on the run dir (poll loop starts at t=0); harvest
+            # reuses from_run. Secrets ride env (forwarded by name), never argv.
+            precomputed_run_id: Optional[str] = None
+            if WebConfig.CONTAINERIZED:
+                if not (req.from_run or mode == "harvest"):
+                    precomputed_run_id = AgentConfig.make_run_id(req.requirement)
+                    env["FSC_RUN_ID"] = precomputed_run_id
+                env["DATABASE_URL"] = self._rewrite_db_host_for_container(
+                    AgentConfig.DATABASE_URL
+                )
+                mission_args = argv[argv.index("src.main") + 1:]
+                self._container_name = f"fsc-run-{int(time.time())}"
+                await self._reap_orphan_containers()
+                argv = self._docker_argv(mission_args)
+
             logger.info(f"Launching: {' '.join(argv)}")
             self._proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -146,6 +165,8 @@ class RunSupervisor:
             self._phase = "harvest" if mode == "harvest" else "launching"
             if mode == "harvest" and req.from_run:
                 self._set_run_id(req.from_run)
+            elif precomputed_run_id:
+                self._set_run_id(precomputed_run_id)
 
             self._spawn(self._tail(self._proc.stdout, is_err=False))
             self._spawn(self._tail(self._proc.stderr, is_err=True))
@@ -157,6 +178,27 @@ class RunSupervisor:
         if not self.is_active or self._proc is None:
             return
         self._stopping = True
+
+        # Containerized: terminating the local `docker run` client does NOT
+        # reliably stop the container — stop it by name (SIGTERM→grace→SIGKILL);
+        # --rm then reaps it. The client (_proc) exits once the container is gone.
+        if WebConfig.CONTAINERIZED and self._container_name:
+            logger.info(f"Stopping mission container {self._container_name}.")
+            try:
+                p = await asyncio.create_subprocess_exec(
+                    "docker", "stop", "--time", "15", self._container_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(p.wait(), timeout=30)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"docker stop failed: {e}")
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+            return
+
         logger.info("Stopping mission (terminate).")
         try:
             self._proc.terminate()
@@ -170,15 +212,91 @@ class RunSupervisor:
             except ProcessLookupError:
                 pass
 
+    # ── Containerized launch helpers (option B) ──────────
+
+    async def _reap_orphan_containers(self) -> None:
+        """Remove leftover fsc-run containers from a previous console crash (a
+        detached container can outlive a Helmsman restart). Scoped to our label
+        so we never touch another tenant's containers."""
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "docker", "ps", "-aq", "--filter", "label=fsc-run",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await p.communicate()
+            ids = out.decode().split()
+            if ids:
+                logger.warning(f"Reaping {len(ids)} orphan fsc-run container(s)")
+                rm = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", *ids,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await rm.wait()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"reap orphans failed: {e}")
+
+    def _docker_argv(self, mission_args: list[str]) -> list[str]:
+        """Wrap the mission command in `docker run` (option B). Secrets are
+        forwarded by NAME only (-e VAR), pulled from the docker client's env, so
+        they never appear in argv / logs. PostgreSQL is reached over the bridge
+        via host.docker.internal; the container's noVNC :6080 is published to a
+        host loopback port the existing /vnc proxy already targets."""
+        host_artifacts = str(AgentConfig.ARTIFACTS_DIR.resolve()).replace("\\", "/")
+        forward = [
+            "HELMSMAN_RUN", "PYTHONUNBUFFERED", "RECON_HEADLESS",
+            "HARVEST_HEADLESS", "DATABASE_URL", "LLM_API_KEY", "LLM_BASE_URL",
+            "LLM_MODEL", "VISION_LLM_MODEL", "FSC_RUN_ID",
+        ]
+        argv = [
+            "docker", "run", "--rm", "--init",
+            "--name", self._container_name or "fsc-run",
+            "--label", "fsc-run",
+        ]
+        for var in forward:
+            argv += ["-e", var]
+        argv += [
+            "--add-host", "host.docker.internal:host-gateway",
+            "-p", f"127.0.0.1:{WebConfig.NOVNC_HOST_PORT}:6080",
+            "-v", f"{host_artifacts}:/app/artifacts",
+            WebConfig.RUN_IMAGE,
+            "python", "-u", "-m", "src.main",
+        ]
+        return argv + mission_args
+
+    @staticmethod
+    def _rewrite_db_host_for_container(db_url: str) -> str:
+        """Rewrite a localhost DATABASE_URL so it resolves from inside a
+        container. 127.0.0.1/localhost inside a container is the container's own
+        loopback, not the host; host.docker.internal routes to the host (Docker
+        Desktop provides it; on Linux --add-host=host-gateway does)."""
+        return (
+            db_url.replace("@localhost:", "@host.docker.internal:")
+            .replace("@127.0.0.1:", "@host.docker.internal:")
+        )
+
     async def answer_gate(self, decision: str) -> bool:
-        if not self.is_active or self._proc is None or self._proc.stdin is None:
+        """Answer the recon→harvest gate by writing its response file.
+
+        The mission (src/cli/gate.py) under HELMSMAN_RUN=1 raises gate_pending
+        via status.json and polls workspace/gate_response.json — the same
+        cross-process signal-file pattern human-assist uses. We write the
+        decision here; the gate consumes it and clears gate_pending on its next
+        status.json flush. No stdin: this works when the mission is a docker-run
+        container with no attached pipe (the legacy stdin "y\\n"/"n\\n" path is
+        retired).
+        """
+        if not self.is_active or not self._domain or not self._run_id:
             return False
         if not self._gate_pending:
             return False
-        line = "y\n" if decision == "continue" else "n\n"
+        decision = "continue" if decision == "continue" else "stop"
+        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
         try:
-            self._proc.stdin.write(line.encode())
-            await self._proc.stdin.drain()
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "gate_response.json").write_text(
+                json.dumps({"decision": decision}), encoding="utf-8"
+            )
         except Exception as e:
             logger.warning(f"Failed to write gate decision: {e}")
             return False

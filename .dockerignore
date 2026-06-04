@@ -1,0 +1,23 @@
+# Build-context excludes for the run image — keep it small and secret-free.
+# (Runtime data is bind-mounted in; nothing here is needed inside the image.)
+.git
+.venv
+artifacts/
+**/__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tgz
+*.tar.gz
+.camoufox-cache/
+.env
+node_modules/
+docs/
+# session scratch files (this working tree only)
+observations_dump.txt
+observations_extraction.txt
+transcript_analysis.txt
+wm_dump.txt
+five_pass_extract_methods.txt
+svg_run_observations.md
+pw_debug.log

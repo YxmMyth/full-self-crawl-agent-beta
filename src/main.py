@@ -110,7 +110,7 @@ async def run_explore(domain: str, requirement: str) -> None:
     ctx = await browser_manager.launch(headed=not recon_headless)
     logger.info(
         f"Browser launched (headless={recon_headless}), "
-        f"human_assist gateway = TkinterPopup"
+        f"human_assist gateway = {type(browser_manager.gateway).__name__}"
     )
 
     llm = LLMClient()
