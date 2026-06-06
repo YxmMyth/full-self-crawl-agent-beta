@@ -88,13 +88,13 @@
     <div class="bd">
       {% if recent_runs %}
         {% for r in recent_runs %}
-        <div class="runrow">
+        <a class="runrow" href="/archive?domain={{ r.domain|urlencode }}&run_id={{ r.run_id|urlencode }}" style="text-decoration:none; color:inherit;">
           <span class="dot {{ 'ok' if r.has_models else '' }}"></span>
           <div style="min-width:0; flex:1;">
             <div><span class="dom">{{ r.domain }}</span> &nbsp; <span class="rid">{{ r.run_id }}</span></div>
             <div class="req">{{ r.requirement or '(无 requirement.txt)' }}</div>
           </div>
-        </div>
+        </a>
         {% endfor %}
       {% else %}
         <div class="empty">还没有任何 run。发起一个任务开始。</div>

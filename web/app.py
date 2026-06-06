@@ -98,6 +98,19 @@ async def run_dashboard(request: Request):
     )
 
 
+@app.get("/archive", response_class=HTMLResponse)
+async def archive(request: Request, domain: str, run_id: str):
+    """Read-only archive view of ANY past run.
+
+    domain + run_id are QUERY params (a domain can be a full URL whose slashes
+    break path-segment routing). Renders purely from the on-demand REST
+    endpoints (model / tree / file) — no SSE, no supervisor, no live state.
+    """
+    return templates.TemplateResponse(
+        request, "archive.html", {"domain": domain, "run_id": run_id}
+    )
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}

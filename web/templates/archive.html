@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Helmsman — 档案 · {{ domain }}{% endblock %}
+
+{% block crumbs %}
+  <a href="/" style="color:inherit; text-decoration:none; opacity:.8;">← 总览</a>
+{% endblock %}
+
+{% block topbar_right %}
+  <span class="pill"><span class="dot ok"></span>归档(只读)</span>
+{% endblock %}
+
+{% block page_js %}
+{# domain/run_id may be a full URL / contain CJK + parens — emit as JSON so the
+   component reads them safely without HTML-attribute escaping headaches. #}
+<script type="application/json" id="archive-meta">{{ {"domain": domain, "run_id": run_id} | tojson }}</script>
+<script>
+document.addEventListener("alpine:init", () => {
+  Alpine.data("archive", () => ({
+    domain: "", runId: "", requirement: "",
+    counts: null, tree: null,
+    modelTab: "semantic", modelHtml: "",
+    strategyHtml: "", hasStrategy: false,
+    filePath: null, fileHtml: "", fileLoading: false,
+
+    init() {
+      try {
+        const meta = JSON.parse(document.getElementById("archive-meta").textContent);
+        this.domain = meta.domain; this.runId = meta.run_id;
+      } catch (e) {}
+      // Everything is REST-on-demand (no SSE) — this run is historical.
+      this.loadRequirement();
+      this.loadTree();
+      this.loadModel("semantic");
+      this.loadStrategy();
+    },
+
+    q() { return `domain=${encodeURIComponent(this.domain)}&run_id=${encodeURIComponent(this.runId)}`; },
+
+    async loadRequirement() {
+      try {
+        const r = await fetch(`/api/runs/file?${this.q()}&path=requirement.txt`);
+        if (r.ok) this.requirement = (await r.text()).trim();
+      } catch (e) {}
+    },
+    async loadTree() {
+      try {
+        const r = await fetch(`/api/runs/tree?${this.q()}`);
+        if (r.ok) { const j = await r.json(); this.tree = j.dirs || {}; this.counts = j.counts || null; }
+      } catch (e) {}
+    },
+    async loadModel(type) {
+      this.modelTab = type;
+      this.modelHtml = "<div class='empty'>加载中…</div>";
+      try {
+        const r = await fetch(`/api/runs/model?${this.q()}&type=${type}`);
+        const j = await r.json();
+        this.modelHtml = j.markdown ? marked.parse(j.markdown) : "<div class='empty'>(空)</div>";
+      } catch (e) { this.modelHtml = "<div class='empty'>加载失败</div>"; }
+    },
+    async loadStrategy() {
+      try {
+        const r = await fetch(`/api/runs/file?${this.q()}&path=strategy_report.md`);
+        if (r.ok) { this.strategyHtml = marked.parse(await r.text()); this.hasStrategy = true; }
+      } catch (e) {}
+    },
+    async openFile(dir, name) {
+      this.filePath = `${dir}/${name}`;
+      this.fileLoading = true; this.fileHtml = "";
+      try {
+        const r = await fetch(`/api/runs/file?${this.q()}&path=${encodeURIComponent(dir + "/" + name)}`);
+        const txt = await r.text();
+        this.fileHtml = name.endsWith(".md") ? marked.parse(txt) : `<pre class="archive-pre">${this.esc(txt)}</pre>`;
+      } catch (e) { this.fileHtml = "<div class='empty'>加载失败</div>"; }
+      this.fileLoading = false;
+    },
+
+    esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; },
+    fmtBytes(n) { n = n || 0; if (n < 1024) return n + " B"; if (n < 1048576) return (n/1024).toFixed(1)+" KB"; return (n/1048576).toFixed(2)+" MB"; },
+    dirs() { return ["samples","catalog","workspace","research","verification"].map(k => ({ key: k, files: (this.tree && this.tree[k]) || [] })); },
+    anyFiles() { return this.dirs().some(g => g.files.length); },
+  }));
+});
+</script>
+<style>
+  .archive-grid { display:grid; grid-template-columns: 280px 1fr; gap:16px; }
+  .archive-filelist .grp { margin-bottom:10px; }
+  .archive-filelist .grp > .lbl { font-weight:600; font-size:11px; color:#9ca3af; text-transform:uppercase; letter-spacing:.04em; margin:6px 0 4px; }
+  .archive-filelist .frow { display:flex; justify-content:space-between; gap:8px; padding:5px 8px; border-radius:6px; cursor:pointer; font-size:13px; }
+  .archive-filelist .frow:hover { background:rgba(127,127,127,0.12); }
+  .archive-filelist .frow.on { background:rgba(14,165,233,0.20); }
+  .archive-pre { white-space:pre-wrap; word-break:break-word; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; margin:0; }
+  .modeltabs .btn { padding:3px 12px; font-size:13px; }
+  .modeltabs .btn.on { background:#0ea5e9; color:#fff; }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="wrap" x-data="archive">
+
+  <div class="card">
+    <div class="hd">档案 · <span class="dom" x-text="domain"></span></div>
+    <div class="bd">
+      <div class="rid" x-text="runId"></div>
+      <div class="req" style="margin-top:6px" x-text="requirement || '(无 requirement.txt)'"></div>
+      <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap" x-show="counts">
+        <span class="pill">samples <b x-text="counts && counts.samples"></b></span>
+        <span class="pill">catalog <b x-text="counts && counts.catalog"></b></span>
+        <span class="pill">data <b x-text="counts && counts.data_files"></b> · <span x-text="counts && fmtBytes(counts.data_bytes)"></span></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="hd">World Model
+      <span class="modeltabs" style="margin-left:10px">
+        <button class="btn" :class="modelTab==='semantic' && 'on'" @click="loadModel('semantic')">Semantic</button>
+        <button class="btn" :class="modelTab==='procedural' && 'on'" @click="loadModel('procedural')">Procedural</button>
+      </span>
+    </div>
+    <div class="bd md" x-html="modelHtml"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px" x-show="hasStrategy">
+    <div class="hd">策略报告</div>
+    <div class="bd md" x-html="strategyHtml"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="hd">产出文件</div>
+    <div class="bd archive-grid">
+      <div class="archive-filelist">
+        <template x-for="g in dirs()" :key="g.key">
+          <div class="grp" x-show="g.files.length">
+            <div class="lbl" x-text="g.key + ' (' + g.files.length + ')'"></div>
+            <template x-for="f in g.files" :key="f.name">
+              <div class="frow" :class="filePath===(g.key+'/'+f.name) && 'on'" @click="openFile(g.key, f.name)">
+                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap" x-text="f.name"></span>
+                <span style="color:#9ca3af; flex:none" x-text="fmtBytes(f.size)"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+        <div class="empty" x-show="!anyFiles()">无产出文件</div>
+      </div>
+      <div>
+        <div class="empty" x-show="!filePath">← 点左侧文件查看内容</div>
+        <div class="empty" x-show="fileLoading">加载中…</div>
+        <div class="md" x-show="filePath && !fileLoading" x-html="fileHtml"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
