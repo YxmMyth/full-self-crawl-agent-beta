@@ -90,6 +90,7 @@ class RunHandle:
         self._gate_pending: bool = False
         self._assist_pending: bool = False
         self._stopping: bool = False
+        self._finished: bool = False  # set terminal in _wait_exit → frees registry slot
 
         self._runs_before: set[str] = set()
         self._obs_watermark: Optional[int] = None
@@ -606,6 +607,7 @@ class RunHandle:
             outcome, self._phase = "error", "error"
         self._emit_status()
         self.bus.publish(DoneEvent(outcome=outcome))
+        self._finished = True  # terminal — the registry stops counting this slot
 
     # ── Helpers ──────────────────────────────────────────
 
@@ -644,3 +646,88 @@ def _iso_dt(dt) -> Optional[str]:
         return dt.strftime("%H:%M:%S")
     except Exception:
         return str(dt)
+
+
+def _idle_state() -> ActiveRunState:
+    """The 'no active run' state — what the legacy /api/runs/active returns when
+    nothing has been launched yet."""
+    return ActiveRunState(
+        active=False, run_id=None, domain=None, requirement=None, mode=None,
+        phase="idle", pid=None, started_at=None,
+        gate_pending=False, assist_pending=False,
+    )
+
+
+class RunRegistry:
+    """Owns all runs as a list of RunHandle, with admission control: a per-domain
+    serial lock (one run per domain — Firefox single-profile) + a configurable
+    concurrency cap (WebConfig.MAX_CONCURRENT_RUNS). Each run gets its OWN
+    EventBus + ArtifactService for full isolation between concurrent runs.
+
+    At cap=1 this is byte-identical to the old single supervisor: the legacy
+    /api/stream + /api/runs/active/* resolve to the most-recent run via newest().
+    Per-run addressing (/api/stream/{run_id}, the multi-run board) is a later
+    step.
+    """
+
+    def __init__(self, db_read: DbReadService) -> None:
+        self._db = db_read
+        self._handles: list[RunHandle] = []
+        self._admit_lock = asyncio.Lock()
+
+    # ── views ────────────────────────────────────────────
+
+    def _live(self) -> list[RunHandle]:
+        """Handles still occupying a slot (launching or running) — for admission."""
+        return [h for h in self._handles if not h._finished]
+
+    def newest(self) -> Optional[RunHandle]:
+        """The most-recent run (live or just-finished) — the single-run alias
+        backing /api/stream + /api/runs/active/* so the frontend stays untouched."""
+        return self._handles[-1] if self._handles else None
+
+    def get(self, run_id: str) -> Optional[RunHandle]:
+        """Resolve a handle by run_id (for the per-run endpoints, later step)."""
+        return next((h for h in self._handles if h._run_id == run_id), None)
+
+    def newest_state(self) -> ActiveRunState:
+        h = self.newest()
+        return h.state() if h is not None else _idle_state()
+
+    def active_states(self) -> list[ActiveRunState]:
+        """All live runs (for the future multi-run board)."""
+        return [h.state() for h in self._live()]
+
+    # ── admission + launch ───────────────────────────────
+
+    async def launch(self, req: LaunchRunRequest) -> ActiveRunState:
+        async with self._admit_lock:
+            live = self._live()
+            cap = WebConfig.MAX_CONCURRENT_RUNS
+            if len(live) >= cap:
+                raise RunActiveError(f"已达并发上限({cap}个)。先停止一个任务再发起。")
+            if any(h._domain == req.domain for h in live):
+                raise RunActiveError(
+                    f"该域名({req.domain})已有任务在跑 —— 同域串行(共用登录档案)。"
+                )
+            # Reserve the slot + claim the domain ATOMICALLY before any await: a
+            # fresh handle with its OWN bus + ArtifactService. Setting _domain now
+            # makes a concurrent same-domain launch see the reservation (no TOCTOU).
+            handle = RunHandle(EventBus(), self._db, ArtifactService())
+            handle._domain = req.domain
+            self._handles.append(handle)
+        # Launch OUTSIDE the admission lock so different-domain launches are not
+        # serialized behind the slow `docker run`.
+        try:
+            return await handle.launch(req)
+        except Exception:
+            handle._finished = True  # free the reservation on launch failure
+            raise
+
+    async def shutdown(self) -> None:
+        """Stop every live run (lifespan shutdown)."""
+        for h in self._live():
+            try:
+                await h.stop()
+            except Exception:  # noqa: BLE001
+                pass

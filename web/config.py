@@ -56,6 +56,12 @@ class WebConfig:
     RUN_IMAGE: str = os.getenv("HELMSMAN_RUN_IMAGE", "fsc-run:dev")
     NOVNC_HOST_PORT: int = int(os.getenv("HELMSMAN_NOVNC_HOST_PORT", "6080"))
 
+    # Max runs allowed to EXECUTE concurrently (RunRegistry admission). Shipped
+    # at 1 (single-serial, byte-identical to pre-registry behavior); raised to 6
+    # once the N>1 landmines are fixed. The per-domain serial lock applies on top
+    # regardless of this number.
+    MAX_CONCURRENT_RUNS: int = int(os.getenv("HELMSMAN_MAX_CONCURRENT_RUNS", "1"))
+
     # ── Paths ────────────────────────────────────────────
     ARTIFACTS_DIR: Path = AgentConfig.ARTIFACTS_DIR
     WEB_DIR: Path = Path(__file__).resolve().parent

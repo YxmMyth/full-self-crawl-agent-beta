@@ -30,7 +30,7 @@ from web.services.artifacts import ArtifactService
 from web.services.db_read import DbReadService
 from web.services.eventbus import EventBus
 from web.services.novnc_proxy import NoVncProxy
-from web.services.supervisor import RunHandle
+from web.services.supervisor import RunRegistry
 
 logger = get_logger("helmsman.app")
 
@@ -46,20 +46,18 @@ async def lifespan(app: FastAPI):
     await db.connect()
     logger.info("Database connected (read-only console use)")
 
-    bus = EventBus()
-    arts = ArtifactService()
-    sup = RunHandle(bus, DbReadService(), arts)
+    arts = ArtifactService()  # shared, read-only — for REST reads + pages
+    registry = RunRegistry(DbReadService())
     vnc = NoVncProxy()
-    app.state.bus = bus
     app.state.artifacts = arts
-    app.state.supervisor = sup
+    app.state.registry = registry
     app.state.vnc = vnc
 
     logger.info(f"Helmsman ready on http://{WebConfig.HOST}:{WebConfig.PORT}")
     try:
         yield
     finally:
-        await sup.stop()
+        await registry.shutdown()
         await vnc.aclose()
         await db.close()
         logger.info("Helmsman shut down")
@@ -76,21 +74,21 @@ app.include_router(artifacts_api.router)
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     arts: ArtifactService = request.app.state.artifacts
-    sup: RunHandle = request.app.state.supervisor
+    registry: RunRegistry = request.app.state.registry
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "recent_runs": arts.list_all_runs(limit=20),
-            "active": sup.state().model_dump(),
+            "active": registry.newest_state().model_dump(),
         },
     )
 
 
 @app.get("/run", response_class=HTMLResponse)
 async def run_dashboard(request: Request):
-    sup: RunHandle = request.app.state.supervisor
-    state = sup.state()
+    registry: RunRegistry = request.app.state.registry
+    state = registry.newest_state()
     if not state.active and state.run_id is None:
         return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(

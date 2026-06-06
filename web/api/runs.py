@@ -1,7 +1,9 @@
-"""REST endpoints for launching and controlling the single active run.
+"""REST endpoints for launching and controlling runs.
 
 The launch form (HTMX) posts here; on success we tell HTMX to navigate to the
-live dashboard via the HX-Redirect header.
+live dashboard via the HX-Redirect header. The control endpoints (/runs/active/*)
+resolve to the most-recent run via RunRegistry.newest() so the existing
+single-run frontend is untouched; per-run-id addressing is a later step.
 """
 
 from __future__ import annotations
@@ -11,15 +13,15 @@ from fastapi.responses import JSONResponse, Response
 
 from src.utils.logging import get_logger
 from web.models import GateDecision, LaunchRunRequest
-from web.services.supervisor import RunActiveError, RunHandle
+from web.services.supervisor import RunActiveError, RunRegistry
 
 logger = get_logger("helmsman.api.runs")
 
 router = APIRouter(prefix="/api", tags=["runs"])
 
 
-def _sup(request: Request) -> RunHandle:
-    return request.app.state.supervisor
+def _registry(request: Request) -> RunRegistry:
+    return request.app.state.registry
 
 
 @router.post("/runs")
@@ -46,9 +48,9 @@ async def launch_run(
         return _error_fragment("需求不能为空(explore / auto 模式)。", status=400)
 
     try:
-        await _sup(request).launch(req)
-    except RunActiveError:
-        return _error_fragment("已有任务在运行,请先停止当前任务。", status=409)
+        await _registry(request).launch(req)
+    except RunActiveError as e:  # cap reached OR same-domain already running
+        return _error_fragment(str(e), status=409)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Launch failed: {e}", exc_info=True)
         return _error_fragment(f"启动失败:{e}", status=500)
@@ -58,19 +60,22 @@ async def launch_run(
 
 @router.get("/runs/active")
 async def active_run(request: Request):
-    return JSONResponse(_sup(request).state().model_dump())
+    return JSONResponse(_registry(request).newest_state().model_dump())
 
 
 @router.post("/runs/active/stop")
 async def stop_run(request: Request):
-    await _sup(request).stop()
+    h = _registry(request).newest()
+    if h is not None:
+        await h.stop()
     return Response(status_code=204)
 
 
 @router.post("/runs/active/gate")
 async def gate_decision(request: Request, decision: str = Form(...)):
     dec = GateDecision(decision="continue" if decision == "continue" else "stop")
-    ok = await _sup(request).answer_gate(dec.decision)
+    h = _registry(request).newest()
+    ok = await h.answer_gate(dec.decision) if h is not None else False
     return JSONResponse({"ok": ok})
 
 
@@ -81,8 +86,13 @@ async def assist_answer(
     status: str = Form("completed"),
 ):
     """Answer a pending human-assist request (operator clicked 完成 / 跳过)."""
-    ok = await _sup(request).answer_assist(
-        uuid.strip(), "cancelled" if status == "cancelled" else "completed"
+    h = _registry(request).newest()
+    ok = (
+        await h.answer_assist(
+            uuid.strip(), "cancelled" if status == "cancelled" else "completed"
+        )
+        if h is not None
+        else False
     )
     return JSONResponse({"ok": ok})
 
