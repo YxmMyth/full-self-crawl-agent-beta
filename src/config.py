@@ -103,13 +103,16 @@ class Config:
     def make_run_id(cls, requirement: str) -> str:
         """Compute (but don't set) a RUN_ID from requirement + timestamp.
 
-        Format: {YYYYMMDD-HHMM}_{requirement_slug_max_30_chars}. Pure — lets a
-        caller (e.g. the Helmsman supervisor) generate the id host-side and
-        inject it into a containerized run via FSC_RUN_ID.
+        Format: {YYYYMMDD-HHMMSS}_{slug}_{rand4}. SECONDS precision + a short
+        random suffix keep run_ids collision-proof even when several launch in
+        the same minute — every DB row is tagged by run_id ONLY, so a collision
+        would silently MERGE two concurrent runs' data (the N>1 landmine). Pure —
+        the Helmsman registry mints it host-side and injects it via FSC_RUN_ID.
         """
-        ts = time.strftime("%Y%m%d-%H%M", time.localtime())
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         slug = _slugify(requirement, max_len=30)
-        return f"{ts}_{slug}" if slug else ts
+        rand = os.urandom(2).hex()  # 4 hex chars
+        return (f"{ts}_{slug}" if slug else ts) + f"_{rand}"
 
     @classmethod
     def set_run_id(cls, requirement: str) -> str:
