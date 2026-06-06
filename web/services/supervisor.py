@@ -91,6 +91,7 @@ class RunHandle:
         self._assist_pending: bool = False
         self._stopping: bool = False
         self._finished: bool = False  # set terminal in _wait_exit → frees registry slot
+        self._publish_vnc: bool = True  # registry: only one live run holds host :6080
 
         self._runs_before: set[str] = set()
         self._obs_watermark: Optional[int] = None
@@ -150,8 +151,8 @@ class RunHandle:
                 )
                 mission_args = argv[argv.index("src.main") + 1:]
                 self._container_name = f"fsc-run-{int(time.time())}"
-                await self._reap_orphan_containers()
-                argv = self._docker_argv(mission_args)
+                label_run_id = precomputed_run_id or req.from_run or ""
+                argv = self._docker_argv(mission_args, label_run_id)
 
             logger.info(f"Launching: {' '.join(argv)}")
             self._proc = await asyncio.create_subprocess_exec(
@@ -215,29 +216,7 @@ class RunHandle:
 
     # ── Containerized launch helpers (option B) ──────────
 
-    async def _reap_orphan_containers(self) -> None:
-        """Remove leftover fsc-run containers from a previous console crash (a
-        detached container can outlive a Helmsman restart). Scoped to our label
-        so we never touch another tenant's containers."""
-        try:
-            p = await asyncio.create_subprocess_exec(
-                "docker", "ps", "-aq", "--filter", "label=fsc-run",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            out, _ = await p.communicate()
-            ids = out.decode().split()
-            if ids:
-                logger.warning(f"Reaping {len(ids)} orphan fsc-run container(s)")
-                rm = await asyncio.create_subprocess_exec(
-                    "docker", "rm", "-f", *ids,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await rm.wait()
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"reap orphans failed: {e}")
-
-    def _docker_argv(self, mission_args: list[str]) -> list[str]:
+    def _docker_argv(self, mission_args: list[str], run_id_label: str = "") -> list[str]:
         """Wrap the mission command in `docker run` (option B). Secrets are
         forwarded by NAME only (-e VAR), pulled from the docker client's env, so
         they never appear in argv / logs. PostgreSQL is reached over the bridge
@@ -254,11 +233,17 @@ class RunHandle:
             "--name", self._container_name or "fsc-run",
             "--label", "fsc-run",
         ]
+        if run_id_label:
+            argv += ["--label", f"fsc-run-id={run_id_label}"]
         for var in forward:
             argv += ["-e", var]
+        argv += ["--add-host", "host.docker.internal:host-gateway"]
+        # Only the run holding host :6080 publishes noVNC; concurrent runs run
+        # without external VNC (per-run dynamic ports are Phase 2). The registry
+        # sets _publish_vnc before launch.
+        if self._publish_vnc:
+            argv += ["-p", f"127.0.0.1:{WebConfig.NOVNC_HOST_PORT}:6080"]
         argv += [
-            "--add-host", "host.docker.internal:host-gateway",
-            "-p", f"127.0.0.1:{WebConfig.NOVNC_HOST_PORT}:6080",
             "-v", f"{host_artifacts}:/app/artifacts",
             WebConfig.RUN_IMAGE,
             "python", "-u", "-m", "src.main",
@@ -715,6 +700,7 @@ class RunRegistry:
             # makes a concurrent same-domain launch see the reservation (no TOCTOU).
             handle = RunHandle(EventBus(), self._db, ArtifactService())
             handle._domain = req.domain
+            handle._publish_vnc = not any(h._publish_vnc for h in self._live())
             self._handles.append(handle)
         # Launch OUTSIDE the admission lock so different-domain launches are not
         # serialized behind the slow `docker run`.
@@ -731,3 +717,27 @@ class RunRegistry:
                 await h.stop()
             except Exception:  # noqa: BLE001
                 pass
+
+    async def reap_orphans(self) -> None:
+        """At STARTUP (no run live yet), remove leftover fsc-run containers from a
+        previous console session. Done once here, NOT per-launch — a per-launch
+        reap would kill live sibling runs (they all carry label=fsc-run)."""
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "docker", "ps", "-aq", "--filter", "label=fsc-run",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await p.communicate()
+            ids = out.decode().split()
+            if ids:
+                logger.warning(
+                    f"Reaping {len(ids)} orphan fsc-run container(s) at startup"
+                )
+                rm = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", *ids,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await rm.wait()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"reap orphans failed: {e}")

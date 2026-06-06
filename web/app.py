@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     app.state.artifacts = arts
     app.state.registry = registry
     app.state.vnc = vnc
+    await registry.reap_orphans()  # clear orphan containers from a prior session
 
     logger.info(f"Helmsman ready on http://{WebConfig.HOST}:{WebConfig.PORT}")
     try:
@@ -86,9 +87,13 @@ async def index(request: Request):
 
 
 @app.get("/run", response_class=HTMLResponse)
-async def run_dashboard(request: Request):
+async def run_dashboard(request: Request, run_id: str | None = None):
     registry: RunRegistry = request.app.state.registry
-    state = registry.newest_state()
+    if run_id:
+        h = registry.get(run_id)
+        state = h.state() if h is not None else registry.newest_state()
+    else:
+        state = registry.newest_state()
     if not state.active and state.run_id is None:
         return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(

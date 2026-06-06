@@ -63,7 +63,9 @@ document.addEventListener("alpine:init", () => {
     },
 
     connect() {
-      const es = new EventSource("/api/stream");
+      const es = new EventSource(
+        this.runId ? "/api/stream/" + encodeURIComponent(this.runId) : "/api/stream"
+      );
       this._es = es;
       es.onopen = () => (Alpine.store("d").connected = true);
       es.onerror = () => (Alpine.store("d").connected = false);
@@ -148,22 +150,28 @@ document.addEventListener("alpine:init", () => {
     },
 
     // ── actions ──
+    _ctl(action) {
+      // Per-run endpoint when we know our run_id; else the newest-run alias.
+      return this.runId
+        ? "/api/runs/" + encodeURIComponent(this.runId) + "/" + action
+        : "/api/runs/active/" + action;
+    },
     async gate(decision) {
       const fd = new FormData();
       fd.append("decision", decision);
-      await fetch("/api/runs/active/gate", { method: "POST", body: fd });
+      await fetch(this._ctl("gate"), { method: "POST", body: fd });
       this.gatePending = false;
     },
     async answerAssist(status) {
       const fd = new FormData();
       fd.append("uuid", this.assist.uuid || "");
       fd.append("status", status);
-      await fetch("/api/runs/active/assist", { method: "POST", body: fd });
+      await fetch(this._ctl("assist"), { method: "POST", body: fd });
       this.assistPending = false; // optimistic; status.json reconciles
     },
     async stop() {
       if (!confirm("确定停止当前任务?")) return;
-      await fetch("/api/runs/active/stop", { method: "POST" });
+      await fetch(this._ctl("stop"), { method: "POST" });
     },
     async loadModel(type) {
       this.modelTab = type;

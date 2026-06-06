@@ -5,9 +5,10 @@ dashboard mid-run shows everything buffered so far; a reconnect sends
 Last-Event-ID and the bus replays only the gap. Event name = the model's `type`;
 data = the model JSON; id = bus seq.
 
-The bus is resolved per-connection from RunRegistry.newest() (the most-recent
-run's own EventBus), so the legacy /api/stream keeps working unchanged. Per-run
-/api/stream/{run_id} is a later step.
+  - GET /api/stream            → the most-recent run's bus (legacy single-run alias)
+  - GET /api/stream/{run_id}   → that specific run's bus (per-run, for N>1)
+
+Each run owns its own EventBus, so the two never interleave events.
 """
 
 from __future__ import annotations
@@ -26,17 +27,16 @@ def _registry(request: Request) -> RunRegistry:
     return request.app.state.registry
 
 
-@router.get("/stream")
-async def stream(request: Request):
-    handle = _registry(request).newest()
-    last_id_raw = request.headers.get("last-event-id")
-    # Reconnect → resume after client's last id. Fresh → replay whole ring (>0).
-    last_id = int(last_id_raw) if last_id_raw and last_id_raw.isdigit() else 0
+def _last_id(request: Request) -> int:
+    raw = request.headers.get("last-event-id")
+    return int(raw) if raw and raw.isdigit() else 0
 
+
+def _sse(handle, last_id: int, request: Request) -> EventSourceResponse:
     async def gen():
         yield {"event": "hello", "data": "{}"}
         if handle is None:
-            # No run yet — hold the SSE open (pings) until the client reconnects.
+            # No such run (or none active) — hold the SSE open until reconnect.
             while not await request.is_disconnected():
                 await asyncio.sleep(15)
             return
@@ -46,3 +46,13 @@ async def stream(request: Request):
             yield {"event": ev.name, "id": str(ev.seq), "data": ev.json}
 
     return EventSourceResponse(gen(), ping=15)
+
+
+@router.get("/stream")
+async def stream(request: Request):
+    return _sse(_registry(request).newest(), _last_id(request), request)
+
+
+@router.get("/stream/{run_id}")
+async def stream_run(request: Request, run_id: str):
+    return _sse(_registry(request).get(run_id), _last_id(request), request)

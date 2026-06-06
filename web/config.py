@@ -60,7 +60,7 @@ class WebConfig:
     # at 1 (single-serial, byte-identical to pre-registry behavior); raised to 6
     # once the N>1 landmines are fixed. The per-domain serial lock applies on top
     # regardless of this number.
-    MAX_CONCURRENT_RUNS: int = int(os.getenv("HELMSMAN_MAX_CONCURRENT_RUNS", "1"))
+    MAX_CONCURRENT_RUNS: int = int(os.getenv("HELMSMAN_MAX_CONCURRENT_RUNS", "6"))
 
     # ── Paths ────────────────────────────────────────────
     ARTIFACTS_DIR: Path = AgentConfig.ARTIFACTS_DIR
