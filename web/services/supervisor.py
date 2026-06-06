@@ -150,7 +150,10 @@ class RunHandle:
                     AgentConfig.DATABASE_URL
                 )
                 mission_args = argv[argv.index("src.main") + 1:]
-                self._container_name = f"fsc-run-{int(time.time())}"
+                # Random suffix, not just int(time.time()): two runs launched in
+                # the SAME second would otherwise collide on the docker --name and
+                # the 2nd `docker run` fails with "name already in use".
+                self._container_name = f"fsc-run-{int(time.time())}-{os.urandom(3).hex()}"
                 label_run_id = precomputed_run_id or req.from_run or ""
                 argv = self._docker_argv(mission_args, label_run_id)
 

@@ -9,18 +9,41 @@
   {% endif %}
 {% endblock %}
 
+{% block page_js %}
+<script>
+document.addEventListener("alpine:init", () => {
+  Alpine.data("activeBoard", () => ({
+    runs: [],
+    async tick() {
+      try {
+        const r = await fetch("/api/runs/active_list");
+        const j = await r.json();
+        this.runs = j.runs || [];
+      } catch (e) {}
+    },
+    start() { this.tick(); setInterval(() => this.tick(), 3000); },
+  }));
+});
+</script>
+{% endblock %}
+
 {% block body %}
 <div class="wrap narrow">
 
-  {% if active.active %}
-  <div class="banner gate">
-    <div class="grow">
-      <div class="ttl">已有任务在运行</div>
-      <div>{{ active.domain }} · {{ active.run_id }} · 阶段 {{ active.phase }}</div>
+  <div class="card" x-data="activeBoard" x-init="start()" x-show="runs.length" style="margin-bottom:18px;">
+    <div class="hd">运行中 <span class="count" x-text="runs.length"></span></div>
+    <div class="bd">
+      <template x-for="r in runs" :key="r.run_id">
+        <a class="runrow" :href="'/run?run_id=' + encodeURIComponent(r.run_id)" style="text-decoration:none; color:inherit;">
+          <span class="dot live"></span>
+          <div style="min-width:0; flex:1;">
+            <div><span class="dom" x-text="r.domain"></span> &nbsp; <span class="rid" x-text="r.run_id"></span></div>
+            <div class="req" x-text="r.phase + (r.requirement ? ' · ' + r.requirement : '')"></div>
+          </div>
+        </a>
+      </template>
     </div>
-    <a class="btn primary" href="/run">查看实时看板 →</a>
   </div>
-  {% endif %}
 
   <div class="card">
     <div class="hd">发起任务</div>

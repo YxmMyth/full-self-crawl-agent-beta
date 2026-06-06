@@ -71,6 +71,13 @@ async def active_run(request: Request):
     return JSONResponse(_registry(request).newest_state().model_dump())
 
 
+@router.get("/runs/active_list")
+async def active_list(request: Request):
+    """All currently-live runs — drives the shared LIVE board on the home page."""
+    states = _registry(request).active_states()
+    return JSONResponse({"runs": [s.model_dump() for s in states]})
+
+
 @router.post("/runs/active/stop")
 async def stop_run(request: Request):
     h = _registry(request).newest()
