@@ -1,4 +1,4 @@
-"""RunSupervisor — owns the single serial mission subprocess.
+"""RunHandle — owns the single serial mission subprocess.
 
 The agent runs in its OWN process (`python -u -m src.main …`) so the console
 survives an agent crash / Camoufox OOM and can show the failure. The supervisor:
@@ -66,7 +66,7 @@ class RunActiveError(RuntimeError):
     """Raised when a launch is attempted while a run is already active."""
 
 
-class RunSupervisor:
+class RunHandle:
     """Owns the single serial run. One instance lives in app.state."""
 
     def __init__(

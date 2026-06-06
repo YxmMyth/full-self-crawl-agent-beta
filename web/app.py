@@ -30,7 +30,7 @@ from web.services.artifacts import ArtifactService
 from web.services.db_read import DbReadService
 from web.services.eventbus import EventBus
 from web.services.novnc_proxy import NoVncProxy
-from web.services.supervisor import RunSupervisor
+from web.services.supervisor import RunHandle
 
 logger = get_logger("helmsman.app")
 
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
 
     bus = EventBus()
     arts = ArtifactService()
-    sup = RunSupervisor(bus, DbReadService(), arts)
+    sup = RunHandle(bus, DbReadService(), arts)
     vnc = NoVncProxy()
     app.state.bus = bus
     app.state.artifacts = arts
@@ -76,7 +76,7 @@ app.include_router(artifacts_api.router)
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     arts: ArtifactService = request.app.state.artifacts
-    sup: RunSupervisor = request.app.state.supervisor
+    sup: RunHandle = request.app.state.supervisor
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -89,7 +89,7 @@ async def index(request: Request):
 
 @app.get("/run", response_class=HTMLResponse)
 async def run_dashboard(request: Request):
-    sup: RunSupervisor = request.app.state.supervisor
+    sup: RunHandle = request.app.state.supervisor
     state = sup.state()
     if not state.active and state.run_id is None:
         return RedirectResponse("/", status_code=302)

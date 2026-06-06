@@ -11,14 +11,14 @@ from fastapi.responses import JSONResponse, Response
 
 from src.utils.logging import get_logger
 from web.models import GateDecision, LaunchRunRequest
-from web.services.supervisor import RunActiveError, RunSupervisor
+from web.services.supervisor import RunActiveError, RunHandle
 
 logger = get_logger("helmsman.api.runs")
 
 router = APIRouter(prefix="/api", tags=["runs"])
 
 
-def _sup(request: Request) -> RunSupervisor:
+def _sup(request: Request) -> RunHandle:
     return request.app.state.supervisor
 
 
