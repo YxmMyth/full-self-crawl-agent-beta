@@ -38,6 +38,7 @@ async def launch_run(
     gate: str | None = Form(None),  # checkbox: present = checked
     headed: str | None = Form(None),
     from_run: str | None = Form(None),
+    operator: str = Form(""),
 ):
     """Launch a mission (form-encoded). Redirects to /run?run_id= on success."""
     from_run = (from_run or "").strip() or None
@@ -48,6 +49,7 @@ async def launch_run(
         gate=gate is not None,
         headed=headed is not None,
         from_run=from_run,
+        operator=operator.strip(),
     )
     if not req.from_run and req.mode != "harvest" and not req.requirement:
         return _error_fragment("需求不能为空(explore / auto 模式)。", status=400)

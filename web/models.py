@@ -37,6 +37,7 @@ class LaunchRunRequest(BaseModel):
     gate: bool = True  # auto mode only; ask the operator at the recon→harvest gate
     headed: bool = True  # headed browser (login / CAPTCHA visible via noVNC)
     from_run: Optional[str] = None  # harvest from an existing recon run_id
+    operator: str = ""  # who launched it (honor-system tag; no auth)
 
 
 class GateDecision(BaseModel):
@@ -65,6 +66,7 @@ class ActiveRunState(BaseModel):
     started_at: Optional[str] = None
     gate_pending: bool = False
     assist_pending: bool = False
+    operator: Optional[str] = None  # who launched it (honor-system tag)
 
 
 # ── Live events (SSE firehose) ───────────────────────────

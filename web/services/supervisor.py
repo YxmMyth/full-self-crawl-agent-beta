@@ -84,6 +84,7 @@ class RunHandle:
         self._run_id: Optional[str] = None
         self._domain: Optional[str] = None
         self._requirement: Optional[str] = None
+        self._operator: str = ""
         self._mode: Optional[str] = None
         self._phase: str = "idle"
         self._started_at: Optional[float] = None
@@ -119,6 +120,7 @@ class RunHandle:
             started_at=_iso(self._started_at),
             gate_pending=self._gate_pending,
             assist_pending=self._assist_pending,
+            operator=self._operator or None,
         )
 
     async def launch(self, req: LaunchRunRequest) -> ActiveRunState:
@@ -604,6 +606,7 @@ class RunHandle:
         self._run_id = None
         self._domain = req.domain
         self._requirement = req.requirement
+        self._operator = req.operator
         self._mode = mode
         self._phase = "launching"
         self._gate_pending = False
@@ -682,8 +685,18 @@ class RunRegistry:
         return h.state() if h is not None else _idle_state()
 
     def active_states(self) -> list[ActiveRunState]:
-        """All live runs (for the future multi-run board)."""
+        """All live runs (for the multi-run board)."""
         return [h.state() for h in self._live()]
+
+    def _prune_terminal(self, keep: int = 30) -> None:
+        """Drop the oldest finished handles (keep all live + the last `keep`
+        finished) so the registry doesn't grow without bound. A dropped run's
+        /api/stream/{run_id} then idles — its DoneEvent was long since delivered."""
+        finished = [h for h in self._handles if h._finished]
+        if len(finished) <= keep:
+            return
+        drop = set(finished[: len(finished) - keep])
+        self._handles = [h for h in self._handles if h not in drop]
 
     # ── admission + launch ───────────────────────────────
 
@@ -711,6 +724,7 @@ class RunRegistry:
                 if p not in used
             )
             self._handles.append(handle)
+            self._prune_terminal(keep=30)  # bound memory: keep live + recent finished
         # Launch OUTSIDE the admission lock so different-domain launches are not
         # serialized behind the slow `docker run`.
         try:

@@ -38,7 +38,7 @@ document.addEventListener("alpine:init", () => {
           <span class="dot live"></span>
           <div style="min-width:0; flex:1;">
             <div><span class="dom" x-text="r.domain"></span> &nbsp; <span class="rid" x-text="r.run_id"></span></div>
-            <div class="req" x-text="r.phase + (r.requirement ? ' · ' + r.requirement : '')"></div>
+            <div class="req" x-text="(r.operator ? '👤 ' + r.operator + ' · ' : '') + r.phase + (r.requirement ? ' · ' + r.requirement : '')"></div>
           </div>
         </a>
       </template>
@@ -52,6 +52,10 @@ document.addEventListener("alpine:init", () => {
         <div class="field">
           <label>目标域名</label>
           <input type="text" name="domain" placeholder="codepen.io" required>
+        </div>
+        <div class="field">
+          <label>你是谁(发起人 · 显示在看板,荣誉制)</label>
+          <input type="text" name="operator" placeholder="小王">
         </div>
         <div class="field">
           <label>需求(自由文本 — 任务边界)</label>
