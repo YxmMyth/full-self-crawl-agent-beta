@@ -125,11 +125,15 @@ async def healthz():
 # CORS) and means the operator forwards only port 8000.
 
 
-@app.websocket("/vnc/websockify")
-async def vnc_websockify(websocket: WebSocket):
-    await websocket.app.state.vnc.relay_ws(websocket)
+@app.websocket("/vnc/{run_id}/websockify")
+async def vnc_websockify(websocket: WebSocket, run_id: str):
+    h = websocket.app.state.registry.get(run_id)
+    upstream = f"127.0.0.1:{h._vnc_port}" if h is not None and h._vnc_port else None
+    await websocket.app.state.vnc.relay_ws(websocket, upstream)
 
 
-@app.get("/vnc/{path:path}")
-async def vnc_assets(request: Request, path: str):
-    return await request.app.state.vnc.proxy_http(request, path)
+@app.get("/vnc/{run_id}/{path:path}")
+async def vnc_assets(request: Request, run_id: str, path: str):
+    h = request.app.state.registry.get(run_id)
+    upstream = f"127.0.0.1:{h._vnc_port}" if h is not None and h._vnc_port else None
+    return await request.app.state.vnc.proxy_http(request, path, upstream)

@@ -65,9 +65,14 @@ class NoVncProxy:
 
     # ── HTTP assets ──────────────────────────────────────
 
-    async def proxy_http(self, request, path: str) -> Response:
-        """Proxy an HTTP GET for a noVNC static asset."""
-        url = f"http://{self.upstream}/{path}"
+    async def proxy_http(self, request, path: str, upstream: Optional[str] = None) -> Response:
+        """Proxy an HTTP GET for a noVNC static asset to the given run's
+        websockify (host:port); falls back to the static upstream if not given."""
+        up = upstream or self.upstream
+        if not up:
+            return Response(content=b"no VNC for this run", status_code=502,
+                            media_type="text/plain")
+        url = f"http://{up}/{path}"
         if request.url.query:
             url = f"{url}?{request.url.query}"
         headers = {
@@ -98,17 +103,26 @@ class NoVncProxy:
 
     # ── WebSocket relay ──────────────────────────────────
 
-    async def relay_ws(self, client_ws: WebSocket) -> None:
-        """Relay the noVNC framebuffer WebSocket to upstream websockify."""
+    async def relay_ws(self, client_ws: WebSocket, upstream: Optional[str] = None) -> None:
+        """Relay the noVNC framebuffer WebSocket to the given run's websockify
+        (host:port); falls back to the static upstream if not given."""
+        up = upstream or self.upstream
         # noVNC negotiates a subprotocol ("binary" on older clients). Echo the
         # first requested one back so the handshake matches.
         requested = client_ws.headers.get("sec-websocket-protocol", "")
         subprotocols = [p.strip() for p in requested.split(",") if p.strip()]
         chosen = subprotocols[0] if subprotocols else None
 
+        if not up:
+            try:
+                await client_ws.close(code=1011)
+            except Exception:
+                pass
+            return
+
         await client_ws.accept(subprotocol=chosen)
 
-        upstream_url = f"ws://{self.upstream}/websockify"
+        upstream_url = f"ws://{up}/websockify"
         try:
             async with websockets.connect(
                 upstream_url,

@@ -30,8 +30,11 @@ document.addEventListener("alpine:init", () => {
     // (local downscale so the whole 1280x900 desktop fits the mini-screen) and
     // shows connection status instead of a silent black canvas. autoconnect
     // skips the Connect dialog; path points at our same-origin WS proxy.
-    _vncBase: "/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=vnc/websockify&view_only=false",
     _es: null,
+    _vncBase() {
+      const r = encodeURIComponent(this.runId || "");
+      return `/vnc/${r}/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=vnc/${r}/websockify&view_only=false`;
+    },
 
     boot(state) {
       state = state || {};
@@ -206,7 +209,7 @@ document.addEventListener("alpine:init", () => {
         this.vncConnected = false;
         this.vncUrl = "";          // unload iframe → VNC live only while viewing
       } else {
-        this.vncUrl = this._vncBase;
+        this.vncUrl = this._vncBase();
         this.vncConnected = true;
       }
     },

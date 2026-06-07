@@ -91,7 +91,7 @@ class RunHandle:
         self._assist_pending: bool = False
         self._stopping: bool = False
         self._finished: bool = False  # set terminal in _wait_exit → frees registry slot
-        self._publish_vnc: bool = True  # registry: only one live run holds host :6080
+        self._vnc_port: Optional[int] = None  # registry assigns a host port → noVNC
 
         self._runs_before: set[str] = set()
         self._obs_watermark: Optional[int] = None
@@ -241,11 +241,10 @@ class RunHandle:
         for var in forward:
             argv += ["-e", var]
         argv += ["--add-host", "host.docker.internal:host-gateway"]
-        # Only the run holding host :6080 publishes noVNC; concurrent runs run
-        # without external VNC (per-run dynamic ports are Phase 2). The registry
-        # sets _publish_vnc before launch.
-        if self._publish_vnc:
-            argv += ["-p", f"127.0.0.1:{WebConfig.NOVNC_HOST_PORT}:6080"]
+        # Each run publishes its container noVNC (:6080) to its own assigned host
+        # port; the /vnc/{run_id}/ proxy routes to it. Set by the registry.
+        if self._vnc_port:
+            argv += ["-p", f"127.0.0.1:{self._vnc_port}:6080"]
         argv += [
             "-v", f"{host_artifacts}:/app/artifacts",
             WebConfig.RUN_IMAGE,
@@ -703,7 +702,14 @@ class RunRegistry:
             # makes a concurrent same-domain launch see the reservation (no TOCTOU).
             handle = RunHandle(EventBus(), self._db, ArtifactService())
             handle._domain = req.domain
-            handle._publish_vnc = not any(h._publish_vnc for h in self._live())
+            # Assign this run a free host port for its noVNC (each concurrent run
+            # gets its own, reached via /vnc/{run_id}/).
+            used = {h._vnc_port for h in self._live() if h._vnc_port is not None}
+            base = WebConfig.NOVNC_HOST_PORT
+            handle._vnc_port = next(
+                p for p in range(base, base + WebConfig.MAX_CONCURRENT_RUNS + 1)
+                if p not in used
+            )
             self._handles.append(handle)
         # Launch OUTSIDE the admission lock so different-domain launches are not
         # serialized behind the slow `docker run`.
