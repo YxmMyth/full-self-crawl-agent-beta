@@ -313,8 +313,13 @@ class LLMClient:
         if raw is None:
             return None
 
-        choice = raw.choices[0]
-        return choice.message.content or None
+        # Route through _parse_response so the content -> reasoning_content
+        # fallback (see LLMResponse.text) applies here too. deepseek thinking-mode
+        # models (e.g. deepseek-v4-pro) often leave `content` empty and put the
+        # answer in `reasoning_content`; reading msg.content directly would
+        # silently drop the whole answer to None.
+        parsed = self._parse_response(raw)
+        return parsed.text or None
 
     # ── describe_image ───────────────────────────────────
 
