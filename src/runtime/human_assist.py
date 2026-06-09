@@ -69,6 +69,22 @@ class HumanAssistGateway(ABC):
         """
         ...
 
+    @abstractmethod
+    async def ask(
+        self,
+        question: str,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        """Ask the human a question and return their typed-text answer.
+
+        Sibling to request(), but a different speech act: request() = "go DO
+        something", ask() = "ANSWER in words". This is NOT a browser operation —
+        no page is involved (intake / gate / auditor escalation call it with no
+        browser at all). The answer text comes back in HumanResponse.message;
+        status is "completed" (answered) / "cancelled" / "timeout".
+        """
+        ...
+
 
 class TerminalGateway(HumanAssistGateway):
     """MVP gateway: terminal print + signal-file polling.
@@ -213,6 +229,82 @@ class TerminalGateway(HumanAssistGateway):
     def _print_done(self, status: str) -> None:
         marker = {"completed": "✓", "timeout": "⏱", "cancelled": "✗"}.get(status, "•")
         print(f"\n{marker} Human assist {status}, agent resuming...\n", flush=True)
+
+    async def ask(
+        self,
+        question: str,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        """Print the question; read a typed answer from stdin (TTY) or a
+        HUMAN_ANSWER file. Legacy path — containerized runs use WebGateway."""
+        answer_file = self.signal_dir / "HUMAN_ANSWER"
+        try:
+            if answer_file.exists():
+                answer_file.unlink()
+        except Exception:
+            pass
+
+        bar = "=" * 64
+        interactive = sys.stdin and sys.stdin.isatty()
+        print(f"\n{bar}", flush=True)
+        print("❓ HUMAN INPUT NEEDED", flush=True)
+        print(bar, flush=True)
+        print(f"Q: {question}", flush=True)
+        if interactive:
+            print("  → 在这个终端直接输入答案后回车", flush=True)
+        else:
+            print(f"  → 把答案写进文件: {answer_file}", flush=True)
+        print(f"{bar}\n", flush=True)
+
+        try:
+            answer = await self._wait_for_answer(answer_file, timeout_s)
+        except asyncio.TimeoutError:
+            return HumanResponse(status="timeout", message=None)
+        except asyncio.CancelledError:
+            return HumanResponse(status="cancelled", message=None)
+        return HumanResponse(status="completed", message=answer)
+
+    async def _wait_for_answer(
+        self, answer_file: Path, timeout_s: float | None
+    ) -> str:
+        """Return the human's answer text from stdin (TTY) or HUMAN_ANSWER file
+        (whichever arrives first)."""
+        async def poll_file() -> str:
+            while True:
+                if answer_file.exists():
+                    try:
+                        text = answer_file.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        text = ""
+                    try:
+                        answer_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    return text
+                await asyncio.sleep(self.POLL_INTERVAL_S)
+
+        tasks = [asyncio.create_task(poll_file())]
+        if sys.stdin and sys.stdin.isatty():
+            loop = asyncio.get_event_loop()
+            tasks.append(asyncio.create_task(
+                loop.run_in_executor(None, sys.stdin.readline)
+            ))
+
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout_s,
+            )
+            for p in pending:
+                p.cancel()
+            if not done:
+                raise asyncio.TimeoutError()
+            result = next(iter(done)).result()
+            return (result or "").strip()
+        except BaseException:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
 
 
 # ── Browser overlay gateway (default for headed local runs) ──────────
@@ -406,6 +498,19 @@ class BrowserOverlayGateway(HumanAssistGateway):
         if self._pending_future and not self._pending_future.done():
             self._pending_future.set_result(HumanResponse(status="cancelled"))
 
+    async def ask(
+        self,
+        question: str,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        """Not supported — the overlay is a button card, not a text input.
+        Containerized runs use WebGateway; raise loudly rather than silently
+        dropping the question."""
+        raise NotImplementedError(
+            "BrowserOverlayGateway has no text-ask path. "
+            "Use WebGateway (containerized) or TkinterPopupGateway."
+        )
+
 
 # ── Tkinter desktop popup gateway (default) ──────────────────────────
 
@@ -479,6 +584,77 @@ def _show_tk_popup_blocking(reason: str) -> str:
     return result["value"]
 
 
+def _show_tk_ask_blocking(question: str) -> tuple[str, str | None]:
+    """Modal Tk dialog with a text Entry. Runs in an executor thread.
+
+    Returns ("completed", answer_text) on 提交; ("cancelled", None) on 取消 / close.
+    """
+    import tkinter as tk
+
+    result: dict[str, Any] = {"status": "cancelled", "answer": None}
+
+    root = tk.Tk()
+    root.title("Recon Agent — 需要你回答")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+
+    body = tk.Frame(root, padx=24, pady=20)
+    body.pack()
+
+    tk.Label(
+        body, text="❓ 需要你回答",
+        font=("Microsoft YaHei UI", 11, "bold"), fg="#1d4ed8",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        body, text=question, font=("Microsoft YaHei UI", 10),
+        wraplength=400, justify=tk.LEFT,
+    ).pack(anchor="w", pady=(0, 12))
+
+    entry = tk.Entry(body, width=48, font=("Microsoft YaHei UI", 10))
+    entry.pack(anchor="w", pady=(0, 16))
+    entry.focus_set()
+
+    btns = tk.Frame(body)
+    btns.pack(anchor="center")
+
+    def on_submit():
+        result["status"] = "completed"
+        result["answer"] = entry.get()
+        root.quit()
+        root.destroy()
+
+    def on_cancel():
+        result["status"] = "cancelled"
+        result["answer"] = None
+        root.quit()
+        root.destroy()
+
+    tk.Button(
+        btns, text="提交 ✓", command=on_submit, width=12, height=1,
+        font=("Microsoft YaHei UI", 10, "bold"),
+    ).pack(side=tk.LEFT, padx=6)
+    tk.Button(
+        btns, text="取消", command=on_cancel, width=12, height=1,
+        font=("Microsoft YaHei UI", 10),
+    ).pack(side=tk.LEFT, padx=6)
+
+    entry.bind("<Return>", lambda e: on_submit())
+
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 3}")
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    root.bind("<Escape>", lambda e: on_cancel())
+    root.lift()
+    root.focus_force()
+
+    root.mainloop()
+    return result["status"], result["answer"]
+
+
 class TkinterPopupGateway(HumanAssistGateway):
     """Always-on-top desktop dialog with 完成 / 跳过 buttons.
 
@@ -528,6 +704,31 @@ class TkinterPopupGateway(HumanAssistGateway):
 
         logger.info(f"Popup assist {response.status}")
         return response
+
+    async def ask(
+        self,
+        question: str,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        logger.info(f"Awaiting human ask (popup): {question[:80]}")
+        loop = asyncio.get_event_loop()
+        try:
+            if timeout_s is None:
+                status, answer = await loop.run_in_executor(
+                    None, _show_tk_ask_blocking, question
+                )
+            else:
+                status, answer = await asyncio.wait_for(
+                    loop.run_in_executor(None, _show_tk_ask_blocking, question),
+                    timeout=timeout_s,
+                )
+            return HumanResponse(status=status, message=answer)
+        except asyncio.TimeoutError:
+            logger.warning(f"Popup ask timed out after {timeout_s}s")
+            return HumanResponse(status="timeout", message=None)
+        except asyncio.CancelledError:
+            logger.warning("Popup ask cancelled")
+            return HumanResponse(status="cancelled", message=None)
 
 
 # ── Web gateway (Helmsman console) ───────────────────────────────────
@@ -656,6 +857,106 @@ class WebGateway(HumanAssistGateway):
                 if status not in ("completed", "cancelled", "timeout"):
                     status = "completed"
                 return status
+            if timeout_s is not None and (time.monotonic() - start) > timeout_s:
+                raise asyncio.TimeoutError()
+            await asyncio.sleep(self.POLL_INTERVAL_S)
+
+    async def ask(
+        self,
+        question: str,
+        timeout_s: float | None = None,
+    ) -> HumanResponse:
+        """Text Q&A over the console. Mirrors request() but: no page (not a
+        browser op), and the response carries the operator's typed answer.
+
+        Flow (parallel to request()):
+          1. write workspace/ask_request_{uuid}.json (durable record)
+          2. raise to the console via status.json (ask_pending / ask_question /
+             ask_uuid / ask_timeout_s) — supervisor surfaces it as a text box
+          3. poll workspace/ask_response_{uuid}.json (the console writes it with
+             {"status": "completed"|"cancelled", "message": "<answer>"})
+          4. consume both files, clear the flags, return the answer in .message
+        """
+        from src.runtime import status_hook
+
+        ask_id = uuid_mod.uuid4().hex[:12]
+        req_file = self.workspace / f"ask_request_{ask_id}.json"
+        resp_file = self.workspace / f"ask_response_{ask_id}.json"
+
+        for f in (req_file, resp_file):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+        try:
+            req_file.write_text(
+                json.dumps(
+                    {"uuid": ask_id, "question": question, "created_at": time.time(),
+                     "timeout_s": timeout_s},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"WebGateway: failed to write ask request file: {e}")
+
+        status_hook.set_flag(
+            ask_pending=True,
+            ask_question=question,
+            ask_uuid=ask_id,
+            ask_timeout_s=timeout_s,
+        )
+
+        logger.info(f"Awaiting human ask (web): {question[:80]} [{ask_id}]")
+
+        message: str | None = None
+        try:
+            status, message = await self._poll_ask_response(resp_file, timeout_s)
+        except asyncio.TimeoutError:
+            logger.warning(f"Web ask timed out after {timeout_s}s [{ask_id}]")
+            status = "timeout"
+        except asyncio.CancelledError:
+            logger.warning(f"Web ask cancelled [{ask_id}]")
+            status = "cancelled"
+
+        status_hook.set_flag(
+            ask_pending=False,
+            ask_question=None,
+            ask_uuid=None,
+            ask_timeout_s=None,
+        )
+        for f in (req_file, resp_file):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+        logger.info(f"Web ask {status} [{ask_id}]")
+        return HumanResponse(status=status, message=message)
+
+    async def _poll_ask_response(
+        self, resp_file: Path, timeout_s: float | None
+    ) -> tuple[str, str | None]:
+        """Poll for the ask response file. Returns (status, message).
+
+        Content: {"status": "completed"|"cancelled", "message": "<answer>"}.
+        Raises asyncio.TimeoutError if timeout_s elapses first.
+        """
+        start = time.monotonic()
+        while True:
+            if resp_file.exists():
+                try:
+                    data = json.loads(resp_file.read_text(encoding="utf-8"))
+                    status = str(data.get("status", "completed"))
+                    message = data.get("message")
+                except Exception:
+                    status, message = "completed", None
+                if status not in ("completed", "cancelled"):
+                    status = "completed"
+                if status == "cancelled":
+                    message = None
+                return status, message
             if timeout_s is not None and (time.monotonic() - start) > timeout_s:
                 raise asyncio.TimeoutError()
             await asyncio.sleep(self.POLL_INTERVAL_S)

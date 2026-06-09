@@ -66,6 +66,7 @@ class ActiveRunState(BaseModel):
     started_at: Optional[str] = None
     gate_pending: bool = False
     assist_pending: bool = False
+    ask_pending: bool = False  # ask_human text-question waiting on the operator
     operator: Optional[str] = None  # who launched it (honor-system tag)
 
 
@@ -100,6 +101,7 @@ class StatusEvent(BaseModel):
     heartbeat_age: Optional[float] = None
     gate_pending: bool = False
     assist_pending: bool = False
+    ask_pending: bool = False
 
 
 class ObservationEvent(BaseModel):
@@ -146,6 +148,17 @@ class AssistPendingEvent(BaseModel):
     pending: bool
     uuid: Optional[str] = None
     reason: Optional[str] = None
+    timeout_s: Optional[float] = None
+
+
+class AskPendingEvent(BaseModel):
+    """A text question (ask_human / intake / gate calibration) waiting on the
+    operator. Sibling to AssistPendingEvent; carries the question and expects a
+    typed answer back (vs assist's 完成/跳过 ack)."""
+    type: Literal["ask_pending"] = "ask_pending"
+    pending: bool
+    uuid: Optional[str] = None
+    question: Optional[str] = None
     timeout_s: Optional[float] = None
 
 

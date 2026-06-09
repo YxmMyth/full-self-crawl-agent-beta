@@ -208,6 +208,10 @@ textarea { resize: vertical; min-height: 84px; line-height: 1.5; }
 .banner.done .ttl { color: var(--ok); }
 .banner.error { background: #2a1414; border-color: var(--err); }
 .banner.error .ttl { color: var(--err); }
+.banner.ask { background: #1c1633; border-color: #a78bfa; animation: glow 2s infinite; }
+.banner.ask .ttl { color: #c4b5fd; }
+.ask-input { width: 100%; margin-top: 10px; padding: 8px 12px; border: 1px solid #a78bfa; border-radius: 8px; background: #0f0b1f; color: #ede9fe; font: 13px var(--mono); box-sizing: border-box; }
+.ask-input:focus { outline: none; box-shadow: 0 0 0 2px #a78bfa55; }
 @keyframes glow { 0%,100% { box-shadow: 0 0 0 transparent; } 50% { box-shadow: 0 0 22px #fbbf2444; } }
 
 /* ── Log panel ───────────────────────────────────── */

@@ -32,6 +32,7 @@ from web.config import WebConfig
 from web.models import (
     ActiveRunState,
     ArtifactEvent,
+    AskPendingEvent,
     AssistPendingEvent,
     AuditEvent,
     Counts,
@@ -90,6 +91,7 @@ class RunHandle:
         self._started_at: Optional[float] = None
         self._gate_pending: bool = False
         self._assist_pending: bool = False
+        self._ask_pending: bool = False
         self._stopping: bool = False
         self._finished: bool = False  # set terminal in _wait_exit → frees registry slot
         self._vnc_port: Optional[int] = None  # registry assigns a host port → noVNC
@@ -120,6 +122,7 @@ class RunHandle:
             started_at=_iso(self._started_at),
             gate_pending=self._gate_pending,
             assist_pending=self._assist_pending,
+            ask_pending=self._ask_pending,
             operator=self._operator or None,
         )
 
@@ -317,6 +320,35 @@ class RunHandle:
             return False
         # Optimistic local clear; the next status.json read reconciles truth.
         self._assist_pending = False
+        self._emit_status()
+        return True
+
+    async def answer_ask(self, req_uuid: str, message: str, status: str) -> bool:
+        """Answer a pending ask_human text question by writing its response file.
+
+        The WebGateway in the mission subprocess polls for
+        workspace/ask_response_{uuid}.json and reads `message` (the operator's
+        typed answer) back into the agent.
+        """
+        if not self.is_active or not self._domain or not self._run_id:
+            return False
+        if status not in ("completed", "cancelled"):
+            status = "completed"
+        payload = {
+            "status": status,
+            "message": message if status == "completed" else None,
+        }
+        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / f"ask_response_{req_uuid}.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write ask response: {e}")
+            return False
+        # Optimistic local clear; the next status.json read reconciles truth.
+        self._ask_pending = False
         self._emit_status()
         return True
 
@@ -519,6 +551,18 @@ class RunHandle:
             )
         self._assist_pending = new_assist
 
+        new_ask = bool(data.get("ask_pending"))
+        if new_ask != self._ask_pending:
+            self.bus.publish(
+                AskPendingEvent(
+                    pending=new_ask,
+                    uuid=data.get("ask_uuid"),
+                    question=data.get("ask_question"),
+                    timeout_s=data.get("ask_timeout_s"),
+                )
+            )
+        self._ask_pending = new_ask
+
     def _emit_new_audits(self, domain: str, run_id: str) -> None:
         """Publish AuditEvent for any new verification/audit_round_N.json."""
         verif = WebConfig.run_dir(domain, run_id) / "verification"
@@ -577,6 +621,7 @@ class RunHandle:
                 heartbeat_age=heartbeat_age,
                 gate_pending=self._gate_pending,
                 assist_pending=self._assist_pending,
+                ask_pending=self._ask_pending,
             )
         )
 
@@ -611,6 +656,7 @@ class RunHandle:
         self._phase = "launching"
         self._gate_pending = False
         self._assist_pending = False
+        self._ask_pending = False
         self._stopping = False
         self._obs_watermark = None
         self._obs_count = 0
@@ -644,7 +690,7 @@ def _idle_state() -> ActiveRunState:
     return ActiveRunState(
         active=False, run_id=None, domain=None, requirement=None, mode=None,
         phase="idle", pid=None, started_at=None,
-        gate_pending=False, assist_pending=False,
+        gate_pending=False, assist_pending=False, ask_pending=False,
     )
 
 

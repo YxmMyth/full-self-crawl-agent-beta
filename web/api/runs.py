@@ -113,6 +113,25 @@ async def assist_answer(
     return JSONResponse({"ok": ok})
 
 
+@router.post("/runs/active/ask")
+async def ask_answer(
+    request: Request,
+    uuid: str = Form(...),
+    message: str = Form(""),
+    status: str = Form("completed"),
+):
+    h = _registry(request).newest()
+    ok = (
+        await h.answer_ask(
+            uuid.strip(), message,
+            "cancelled" if status == "cancelled" else "completed",
+        )
+        if h is not None
+        else False
+    )
+    return JSONResponse({"ok": ok})
+
+
 # ── per-run (by run_id) → a specific run (for concurrent N>1) ─────────────────
 
 @router.post("/runs/{run_id}/stop")
@@ -142,6 +161,26 @@ async def assist_answer_by_id(
     ok = (
         await h.answer_assist(
             uuid.strip(), "cancelled" if status == "cancelled" else "completed"
+        )
+        if h is not None
+        else False
+    )
+    return JSONResponse({"ok": ok})
+
+
+@router.post("/runs/{run_id}/ask")
+async def ask_answer_by_id(
+    request: Request,
+    run_id: str,
+    uuid: str = Form(...),
+    message: str = Form(""),
+    status: str = Form("completed"),
+):
+    h = _registry(request).get(run_id)
+    ok = (
+        await h.answer_ask(
+            uuid.strip(), message,
+            "cancelled" if status == "cancelled" else "completed",
         )
         if h is not None
         else False

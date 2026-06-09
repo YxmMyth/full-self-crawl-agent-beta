@@ -47,6 +47,12 @@ _state: dict[str, Any] = {
     "assist_reason": None,
     "assist_uuid": None,
     "assist_timeout_s": None,
+    # ask_human channel (text Q&A) — parallel to assist_*; surfaced as a
+    # text-input box on the per-run dashboard.
+    "ask_pending": False,
+    "ask_question": None,
+    "ask_uuid": None,
+    "ask_timeout_s": None,
     "updated_at": None,
 }
 _path: Optional[Path] = None

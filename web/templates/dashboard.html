@@ -59,6 +59,21 @@
     </div>
   </div>
 
+  <!-- Ask banner: a text question (ask_human / intake / gate calibration) — type a reply -->
+  <div class="banner ask" x-show="askPending" x-cloak>
+    <div class="grow">
+      <div class="ttl">❓ 需要你回答</div>
+      <div x-text="ask.question || '请在下方输入你的回答。'" style="white-space:pre-wrap;"></div>
+      <input type="text" class="ask-input" x-model="askMessage"
+             placeholder="输入你的回答…" @keydown.enter="answerAsk('completed')">
+    </div>
+    <span class="crumbs" x-show="ask.timeout_s">超时 <span x-text="ask.timeout_s"></span>s</span>
+    <div style="display:flex; gap:8px;">
+      <button class="btn primary" @click="answerAsk('completed')">提交 ✓</button>
+      <button class="btn" @click="answerAsk('cancelled')">取消</button>
+    </div>
+  </div>
+
   <!-- Gate banner -->
   <div class="banner gate" x-show="gatePending" x-cloak>
     <div class="grow">

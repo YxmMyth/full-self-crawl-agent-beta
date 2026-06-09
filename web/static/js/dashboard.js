@@ -18,6 +18,7 @@ document.addEventListener("alpine:init", () => {
     counts: { locations: 0, observations: 0, sessions: 0, samples: 0, catalog: 0, data_files: 0, data_bytes: 0 },
     // flags
     gatePending: false, assistPending: false, assist: {}, done: null,
+    askPending: false, ask: {}, askMessage: "",
     // collections
     locations: [], observations: [], sessions: [], logs: [],
     artifacts: {}, audit: null,
@@ -44,6 +45,7 @@ document.addEventListener("alpine:init", () => {
       this.phase = state.phase || "idle";
       this.gatePending = !!state.gate_pending;
       this.assistPending = !!state.assist_pending;
+      this.askPending = !!state.ask_pending;
       this.steps = this._stepsFor(this.mode);
       // ESC exits VNC fullscreen.
       document.addEventListener("keydown", (e) => {
@@ -93,6 +95,7 @@ document.addEventListener("alpine:init", () => {
         this.heartbeatAge = (d.heartbeat_age == null ? null : d.heartbeat_age);
         this.gatePending = !!d.gate_pending;
         this.assistPending = !!d.assist_pending;
+        this.askPending = !!d.ask_pending;
       });
       on("location", (d) => {
         if (!this.locations.some((l) => l.pattern === d.pattern))
@@ -118,6 +121,13 @@ document.addEventListener("alpine:init", () => {
         this.assist = d || {};
         // Surface the live browser so the operator can act on the gate.
         if (d.pending) { if (!this.vncConnected) this.toggleVnc(); this.vncExpanded = true; }
+      });
+      on("ask_pending", (d) => {
+        // Text question (ask_human / intake / gate calibration). Unlike assist,
+        // it's not a browser op, so don't auto-open the VNC — just show the box.
+        this.askPending = !!d.pending;
+        this.ask = d || {};
+        if (d.pending) this.askMessage = "";
       });
       on("audit", (d) => { this.audit = d; });
       on("log", (d) => {
@@ -171,6 +181,15 @@ document.addEventListener("alpine:init", () => {
       fd.append("status", status);
       await fetch(this._ctl("assist"), { method: "POST", body: fd });
       this.assistPending = false; // optimistic; status.json reconciles
+    },
+    async answerAsk(status) {
+      const fd = new FormData();
+      fd.append("uuid", this.ask.uuid || "");
+      fd.append("message", this.askMessage || "");
+      fd.append("status", status);
+      await fetch(this._ctl("ask"), { method: "POST", body: fd });
+      this.askPending = false; // optimistic; status.json reconciles
+      this.askMessage = "";
     },
     async stop() {
       if (!confirm("确定停止当前任务?")) return;
