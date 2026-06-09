@@ -16,7 +16,7 @@ A workspace is yours. Write code there, run it, iterate. The workspace IS the ar
 
 1. **Final dataset** under workspace, satisfying the boundary stated in `requirement.txt`.
 2. **Crawl code** (`crawl.py` or whatever you choose) that is reproducible — if rerun against the same workspace, it should produce equivalent data (idempotent or resumable).
-3. **Call `mark_done(reason)`** when you believe the mission is complete. A two-phase audit runs: (a) mechanical sanity on disk (data/ non-empty, >1KB total), (b) single LLM call that loads the criteria from `checklist.md` and evaluates each against actual on-disk evidence. PASS → done; BLOCKED → per-criterion gaps with evidence, you address and retry.
+3. **Call `mark_done(reason)`** when you believe the mission is complete. A two-phase audit runs: (a) mechanical sanity on disk (data/ non-empty, >1KB total), (b) a **read-only auditor agent** that opens your actual data/ files + the catalog universe and judges them against `checklist.md` and the intent's evidence standard — it reads CONTENT, so wrong-kind output (a summary where the artifact was required) fails even if sizes look right. PASS → done; FAIL → specific gaps with quoted evidence, you address and retry; UNCERTAIN → a human is asked to adjudicate.
 
 ## How to think
 
@@ -68,7 +68,7 @@ Then write a reason like: "Harvested 89/89 catalog pens to data/ as `{id}_html.t
 - `think(thought)` — reason without side effects. Use when changing approach, comparing options, or pausing to integrate new findings.
 - `read_world_model(location?)` — read recon's WM (no args = full model; with location = that location's observations).
 - `request_human_assist(reason)` — for true human-only gates only (login form, CAPTCHA, 2FA code, email verification, device verification). NOT for "I'm stuck exploring" or "I haven't found X yet". Be specific in `reason` so the operator knows what to do. After it returns, call `browse()` to re-observe — the tool does NOT confirm "login successful"; you judge from the new page state.
-- `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) single LLM call that loads the criteria from `workspace/checklist.md` and evaluates each against actual disk state. PASS → done. BLOCKED → per-criterion verdict with evidence + actionable gaps, you fix and retry. Your `reason` is one of the inputs — make it concrete (counts, scope, scripts) and the auditor cross-references against the disk.
+- `mark_done(reason)` — claim mission complete. Runs a two-phase audit: (1) mechanical disk sanity (data/ has files, total >1KB, requirement.txt + workspace present); (2) a read-only auditor agent that opens your actual data/ content + the catalog universe and judges each `workspace/checklist.md` criterion against the intent's evidence standard. PASS → done. FAIL → gaps with quoted evidence, you fix and retry. UNCERTAIN → a human adjudicates. Your `reason` is one input — make it concrete (counts, scope, scripts); the auditor cross-references it against the disk it reads.
 
 ## Workspace layout (FOLLOW THIS — auditor uses it to find your work)
 

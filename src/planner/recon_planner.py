@@ -679,7 +679,7 @@ class ReconPlanner:
                 "reason": reason,
             })
 
-        # 'complete' (default) — run the two-phase audit.
+        # 'complete' (default) — run the two-phase audit (mechanical → auditor agent).
         result = await run_audit(
             self.llm, self.domain, self.requirement, reason,
         )
@@ -687,15 +687,58 @@ class ReconPlanner:
             await self._emit_strategy_report(audit_result=result, blocked_reason=None)
             return json.dumps({"status": "DONE", "outcome": "complete"})
 
-        # BLOCKED — feed back specific gaps to the planner.
+        if result.overall == "UNCERTAIN":
+            # The auditor genuinely cannot tell. HOLD for a human (never guess
+            # PASS) — an unprovable result must not slip through.
+            return await self._adjudicate_uncertain(result)
+
+        # FAIL — feed the specific gaps back to the planner to fix.
         return json.dumps({
             "status": "audit_blocked",
             "phase": result.phase,
             "feedback": result.feedback()[:3000],
             "message": (
-                "Audit blocked mark_done. Address the gaps above and call "
-                "mark_done again, or use mark_done(status='blocked', ...) "
-                "if you're truly at an impasse."
+                "Audit found gaps. Address them and call mark_done again, or use "
+                "mark_done(status='blocked', ...) if you're truly at an impasse."
+            ),
+        })
+
+    async def _adjudicate_uncertain(self, result: Any) -> str:
+        """Auditor returned UNCERTAIN → escalate to a human and HOLD. The human's
+        typed answer is authoritative: an explicit accept → DONE; anything else →
+        feed it back as guidance and let recon continue. No human present →
+        gateway.ask holds with no timeout (we never auto-PASS an unproven result;
+        an unattended run parks here by design)."""
+        import re
+
+        gateway = getattr(self.browser_manager, "gateway", None)
+        report = (getattr(result, "report", "") or result.feedback())[:1500]
+        question = (
+            "审计员拿不准 recon 是否真的达标(很可能样本种类 / 内容存疑)。它的判定:\n\n"
+            f"{report}\n\n"
+            "你来定:回复「通过」让它进入 gate;或说明哪里不对,让 agent 继续补。"
+        )
+        answer = ""
+        if gateway is not None:
+            try:
+                resp = await gateway.ask(question=question, timeout_s=None)  # hold
+                answer = (resp.message or "").strip() if resp else ""
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"UNCERTAIN escalation ask failed: {e}")
+        if answer and re.search(r"通过|pass|accept|\bok\b|可以|没问题|算过", answer, re.IGNORECASE):
+            logger.info(f"Human adjudicated UNCERTAIN as PASS: {answer[:120]}")
+            await self._emit_strategy_report(audit_result=result, blocked_reason=None)
+            return json.dumps({
+                "status": "DONE", "outcome": "complete",
+                "note": f"human-adjudicated UNCERTAIN->pass: {answer[:200]}",
+            })
+        feedback = answer or "(审计 UNCERTAIN,且无人裁定)"
+        return json.dumps({
+            "status": "audit_uncertain",
+            "feedback": (result.feedback()[:2400] + f"\n\n[人工裁定] {feedback}")[:3000],
+            "message": (
+                "Audit was UNCERTAIN and a human weighed in. Address the human's "
+                "note and re-mark_done, or mark_done(status='blocked', ...)."
             ),
         })
 

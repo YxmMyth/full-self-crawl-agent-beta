@@ -138,17 +138,55 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
     if result.overall == "PASS":
         ctx._mission_done = True
         return (
-            f"VERIFICATION PASS — all 6 criteria verified against evidence.\n\n"
+            "VERIFICATION PASS — the data was verified against the acceptance "
+            "criteria and the intent's evidence standard.\n\n"
             f"Agent reason recorded: {reason}\n\n"
-            f"Audit report written to verification/."
+            "Audit report written to verification/."
         )
 
-    # BLOCKED — feed back specific gaps so agent can iterate
+    if result.overall == "UNCERTAIN":
+        return await _adjudicate_uncertain(ctx, result)
+
+    # FAIL — feed back specific gaps so the agent can iterate
     feedback = result.feedback()
     return (
-        f"VERIFICATION BLOCKED — the mission is NOT yet complete.\n\n"
+        "VERIFICATION FAIL — the mission is NOT yet complete.\n\n"
         f"{feedback[:3000]}\n\n"
-        "Address the failing criteria's gaps (the evidence + reason fields "
-        "tell you what's missing), then call mark_done again with an updated "
-        "`reason` citing the new evidence."
+        "Address the gaps (the auditor quoted the evidence), then call mark_done "
+        "again with an updated `reason` citing the new evidence."
+    )
+
+
+async def _adjudicate_uncertain(ctx: Any, result: Any) -> str:
+    """Auditor returned UNCERTAIN → escalate to a human and HOLD (never auto-PASS).
+    The human's typed answer is authoritative: an explicit accept → mission done;
+    anything else → feed it back. No human present → gateway.ask holds with no
+    timeout; if no gateway at all, return an UNCERTAIN message (don't pass)."""
+    import re
+
+    gateway = getattr(ctx, "human_assist", None)
+    report = (getattr(result, "report", "") or result.feedback())[:1500]
+    question = (
+        "审计员拿不准 harvest 是否真的达标(很可能数据内容真伪 / 覆盖存疑)。它的判定:\n\n"
+        f"{report}\n\n"
+        "你来定:回复「通过」算完成;或说明哪里不对,让 agent 继续补。"
+    )
+    answer = ""
+    if gateway is not None:
+        try:
+            resp = await gateway.ask(question=question, timeout_s=None)  # hold for human
+            answer = (resp.message or "").strip() if resp else ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"UNCERTAIN escalation ask failed: {e}")
+    if answer and re.search(r"通过|pass|accept|\bok\b|可以|没问题|算过", answer, re.IGNORECASE):
+        ctx._mission_done = True
+        return (
+            "VERIFICATION PASS (human-adjudicated UNCERTAIN) — operator confirmed "
+            f"the result is acceptable: {answer[:200]}"
+        )
+    note = answer or "(审计 UNCERTAIN,且无人裁定)"
+    return (
+        "VERIFICATION UNCERTAIN — the auditor could not establish completion and a "
+        f"human weighed in.\n\n{result.feedback()[:2400]}\n\n[人工裁定] {note}\n\n"
+        "Address the note and call mark_done again, or stop if truly blocked."
     )
