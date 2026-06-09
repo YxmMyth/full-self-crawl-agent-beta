@@ -116,6 +116,16 @@ async def run_explore(domain: str, requirement: str) -> None:
     llm = LLMClient()
     logger.info(f"LLM client ready (model={Config.LLM_MODEL})")
 
+    # Intake: compile the requirement into a pinned intent kernel BEFORE recon
+    # explores. Judgment-driven clarification via the gateway; FAIL-CLOSED if a
+    # genuine ambiguity remains and no human answers (never run on a guessed
+    # requirement). The pinned kernel (run_dir/intent_kernel.md) becomes the
+    # auditor's measuring stick and the gate's calibration target.
+    from src.intake.kernel import compile_intent_kernel
+    await compile_intent_kernel(
+        llm, requirement, run_dir, browser_manager.gateway, domain=domain
+    )
+
     # Build execution tool registry
     execution_registry = build_execution_registry()
     logger.info(f"Execution registry: {len(execution_registry.names())} tools")
