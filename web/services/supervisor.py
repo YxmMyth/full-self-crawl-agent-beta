@@ -268,89 +268,11 @@ class RunHandle:
             .replace("@127.0.0.1:", "@host.docker.internal:")
         )
 
-    async def answer_gate(self, decision: str) -> bool:
-        """Answer the recon→harvest gate by writing its response file.
-
-        The mission (src/cli/gate.py) under HELMSMAN_RUN=1 raises gate_pending
-        via status.json and polls workspace/gate_response.json — the same
-        cross-process signal-file pattern human-assist uses. We write the
-        decision here; the gate consumes it and clears gate_pending on its next
-        status.json flush. No stdin: this works when the mission is a docker-run
-        container with no attached pipe (the legacy stdin "y\\n"/"n\\n" path is
-        retired).
-        """
-        if not self.is_active or not self._domain or not self._run_id:
-            return False
-        if not self._gate_pending:
-            return False
-        decision = "continue" if decision == "continue" else "stop"
-        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
-        try:
-            workspace.mkdir(parents=True, exist_ok=True)
-            (workspace / "gate_response.json").write_text(
-                json.dumps({"decision": decision}), encoding="utf-8"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to write gate decision: {e}")
-            return False
-        self._gate_pending = False
-        self._phase = "harvest" if decision == "continue" else "done"
-        self._emit_status()
-        return True
-
-    async def answer_assist(self, req_uuid: str, status: str) -> bool:
-        """Answer a pending human-assist request by writing its response file.
-
-        The WebGateway in the mission subprocess polls for
-        workspace/assist_response_{uuid}.json. We write it here; the gateway
-        picks it up and clears assist_pending on its next status.json flush.
-        """
-        if not self.is_active or not self._domain or not self._run_id:
-            return False
-        if status not in ("completed", "cancelled"):
-            status = "completed"
-        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
-        try:
-            workspace.mkdir(parents=True, exist_ok=True)
-            (workspace / f"assist_response_{req_uuid}.json").write_text(
-                json.dumps({"status": status}), encoding="utf-8"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to write assist response: {e}")
-            return False
-        # Optimistic local clear; the next status.json read reconciles truth.
-        self._assist_pending = False
-        self._emit_status()
-        return True
-
-    async def answer_ask(self, req_uuid: str, message: str, status: str) -> bool:
-        """Answer a pending ask_human text question by writing its response file.
-
-        The WebGateway in the mission subprocess polls for
-        workspace/ask_response_{uuid}.json and reads `message` (the operator's
-        typed answer) back into the agent.
-        """
-        if not self.is_active or not self._domain or not self._run_id:
-            return False
-        if status not in ("completed", "cancelled"):
-            status = "completed"
-        payload = {
-            "status": status,
-            "message": message if status == "completed" else None,
-        }
-        workspace = WebConfig.run_dir(self._domain, self._run_id) / "workspace"
-        try:
-            workspace.mkdir(parents=True, exist_ok=True)
-            (workspace / f"ask_response_{req_uuid}.json").write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to write ask response: {e}")
-            return False
-        # Optimistic local clear; the next status.json read reconciles truth.
-        self._ask_pending = False
-        self._emit_status()
-        return True
+    # answer_gate / answer_assist / answer_ask live on RunRegistry now: they
+    # write the response file by (domain, run_id) WITHOUT needing this live
+    # handle, so a console restart (which drops every in-memory RunHandle) does
+    # not strand a pending gate / assist / ask. The mission keeps polling the
+    # response file on disk regardless of console process lifetime.
 
     # ── Subprocess argv ──────────────────────────────────
 
@@ -743,6 +665,61 @@ class RunRegistry:
             return
         drop = set(finished[: len(finished) - keep])
         self._handles = [h for h in self._handles if h not in drop]
+
+    # ── operator answers (handle-independent) ─────────────
+    # Write the response signal file by (domain, run_id), NOT via an in-memory
+    # RunHandle: a console restart loses every handle, but the mission keeps
+    # polling the file on disk, so the answer must be writable without one. If a
+    # live handle happens to exist, we also clear its flag optimistically (the
+    # next status.json read reconciles truth either way).
+
+    @staticmethod
+    def _write_response(domain: str, run_id: str, filename: str, payload: dict) -> bool:
+        if not domain or not run_id:
+            return False
+        try:
+            workspace = WebConfig.run_dir(domain, run_id) / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / filename).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to write {filename}: {e}")
+            return False
+
+    async def answer_gate(self, domain: str, run_id: str, decision: str) -> bool:
+        decision = "continue" if decision == "continue" else "stop"
+        ok = self._write_response(domain, run_id, "gate_response.json", {"decision": decision})
+        h = self.get(run_id)
+        if h is not None and h._domain == domain:
+            h._gate_pending = False
+            h._phase = "harvest" if decision == "continue" else "done"
+            h._emit_status()
+        return ok
+
+    async def answer_assist(self, domain: str, run_id: str, req_uuid: str, status: str) -> bool:
+        status = status if status in ("completed", "cancelled") else "completed"
+        ok = self._write_response(
+            domain, run_id, f"assist_response_{req_uuid}.json", {"status": status}
+        )
+        h = self.get(run_id)
+        if h is not None and h._domain == domain:
+            h._assist_pending = False
+            h._emit_status()
+        return ok
+
+    async def answer_ask(
+        self, domain: str, run_id: str, req_uuid: str, message: str, status: str
+    ) -> bool:
+        status = status if status in ("completed", "cancelled") else "completed"
+        payload = {"status": status, "message": message if status == "completed" else None}
+        ok = self._write_response(domain, run_id, f"ask_response_{req_uuid}.json", payload)
+        h = self.get(run_id)
+        if h is not None and h._domain == domain:
+            h._ask_pending = False
+            h._emit_status()
+        return ok
 
     # ── admission + launch ───────────────────────────────
 

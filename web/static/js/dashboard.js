@@ -172,6 +172,7 @@ document.addEventListener("alpine:init", () => {
     async gate(decision) {
       const fd = new FormData();
       fd.append("decision", decision);
+      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
       await fetch(this._ctl("gate"), { method: "POST", body: fd });
       this.gatePending = false;
     },
@@ -179,6 +180,7 @@ document.addEventListener("alpine:init", () => {
       const fd = new FormData();
       fd.append("uuid", this.assist.uuid || "");
       fd.append("status", status);
+      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
       await fetch(this._ctl("assist"), { method: "POST", body: fd });
       this.assistPending = false; // optimistic; status.json reconciles
     },
@@ -187,6 +189,7 @@ document.addEventListener("alpine:init", () => {
       fd.append("uuid", this.ask.uuid || "");
       fd.append("message", this.askMessage || "");
       fd.append("status", status);
+      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
       await fetch(this._ctl("ask"), { method: "POST", body: fd });
       this.askPending = false; // optimistic; status.json reconciles
       this.askMessage = "";

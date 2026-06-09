@@ -17,7 +17,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, Response
 
 from src.utils.logging import get_logger
-from web.models import GateDecision, LaunchRunRequest
+from web.models import LaunchRunRequest
 from web.services.supervisor import RunActiveError, RunRegistry
 
 logger = get_logger("helmsman.api.runs")
@@ -27,6 +27,23 @@ router = APIRouter(prefix="/api", tags=["runs"])
 
 def _registry(request: Request) -> RunRegistry:
     return request.app.state.registry
+
+
+def _resolve(reg: RunRegistry, run_id: str | None, domain: str = "") -> tuple[str, str] | None:
+    """Resolve (domain, run_id) for an answer write. Prefer the client-supplied
+    domain (durable across a console restart — needs no live handle); fall back
+    to the by-id / newest handle's domain when the client didn't send one."""
+    if run_id:
+        dom = domain.strip()
+        if not dom:
+            h = reg.get(run_id)
+            dom = (h.state().domain or "") if h is not None else ""
+        return (dom, run_id) if dom else None
+    h = reg.newest()
+    if h is None:
+        return None
+    st = h.state()
+    return (st.domain, st.run_id) if (st.domain and st.run_id) else None
 
 
 @router.post("/runs")
@@ -90,9 +107,9 @@ async def stop_run(request: Request):
 
 @router.post("/runs/active/gate")
 async def gate_decision(request: Request, decision: str = Form(...)):
-    dec = GateDecision(decision="continue" if decision == "continue" else "stop")
-    h = _registry(request).newest()
-    ok = await h.answer_gate(dec.decision) if h is not None else False
+    reg = _registry(request)
+    t = _resolve(reg, None)
+    ok = await reg.answer_gate(t[0], t[1], decision) if t else False
     return JSONResponse({"ok": ok})
 
 
@@ -102,14 +119,9 @@ async def assist_answer(
     uuid: str = Form(...),
     status: str = Form("completed"),
 ):
-    h = _registry(request).newest()
-    ok = (
-        await h.answer_assist(
-            uuid.strip(), "cancelled" if status == "cancelled" else "completed"
-        )
-        if h is not None
-        else False
-    )
+    reg = _registry(request)
+    t = _resolve(reg, None)
+    ok = await reg.answer_assist(t[0], t[1], uuid.strip(), status) if t else False
     return JSONResponse({"ok": ok})
 
 
@@ -120,15 +132,9 @@ async def ask_answer(
     message: str = Form(""),
     status: str = Form("completed"),
 ):
-    h = _registry(request).newest()
-    ok = (
-        await h.answer_ask(
-            uuid.strip(), message,
-            "cancelled" if status == "cancelled" else "completed",
-        )
-        if h is not None
-        else False
-    )
+    reg = _registry(request)
+    t = _resolve(reg, None)
+    ok = await reg.answer_ask(t[0], t[1], uuid.strip(), message, status) if t else False
     return JSONResponse({"ok": ok})
 
 
@@ -143,10 +149,12 @@ async def stop_run_by_id(request: Request, run_id: str):
 
 
 @router.post("/runs/{run_id}/gate")
-async def gate_decision_by_id(request: Request, run_id: str, decision: str = Form(...)):
-    dec = GateDecision(decision="continue" if decision == "continue" else "stop")
-    h = _registry(request).get(run_id)
-    ok = await h.answer_gate(dec.decision) if h is not None else False
+async def gate_decision_by_id(
+    request: Request, run_id: str, decision: str = Form(...), domain: str = Form("")
+):
+    reg = _registry(request)
+    t = _resolve(reg, run_id, domain)
+    ok = await reg.answer_gate(t[0], t[1], decision) if t else False
     return JSONResponse({"ok": ok})
 
 
@@ -156,15 +164,11 @@ async def assist_answer_by_id(
     run_id: str,
     uuid: str = Form(...),
     status: str = Form("completed"),
+    domain: str = Form(""),
 ):
-    h = _registry(request).get(run_id)
-    ok = (
-        await h.answer_assist(
-            uuid.strip(), "cancelled" if status == "cancelled" else "completed"
-        )
-        if h is not None
-        else False
-    )
+    reg = _registry(request)
+    t = _resolve(reg, run_id, domain)
+    ok = await reg.answer_assist(t[0], t[1], uuid.strip(), status) if t else False
     return JSONResponse({"ok": ok})
 
 
@@ -175,16 +179,11 @@ async def ask_answer_by_id(
     uuid: str = Form(...),
     message: str = Form(""),
     status: str = Form("completed"),
+    domain: str = Form(""),
 ):
-    h = _registry(request).get(run_id)
-    ok = (
-        await h.answer_ask(
-            uuid.strip(), message,
-            "cancelled" if status == "cancelled" else "completed",
-        )
-        if h is not None
-        else False
-    )
+    reg = _registry(request)
+    t = _resolve(reg, run_id, domain)
+    ok = await reg.answer_ask(t[0], t[1], uuid.strip(), message, status) if t else False
     return JSONResponse({"ok": ok})
 
 
