@@ -186,7 +186,8 @@ async def compile_intent_kernel(
                     f"intent clarification needed but no gateway: {question}"
                 )
             resp = await gateway.ask(
-                question=f"[需求澄清] {question}", timeout_s=timeout_s
+                question=f"[需求澄清] {question}", timeout_s=timeout_s,
+                cancellable=False,
             )
             answer = (resp.message or "").strip() if resp is not None else ""
             if resp is None or resp.status != "completed" or not answer:
@@ -215,6 +216,7 @@ async def compile_intent_kernel(
             ),
             timeout_s=timeout_s,
             options=[_CONFIRM_OPT, _ADJUST_OPT],
+            cancellable=False,
         )
         answer = (resp.message or "").strip() if resp is not None else ""
         if resp is None or resp.status != "completed" or not answer:

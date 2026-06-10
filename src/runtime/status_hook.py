@@ -54,6 +54,7 @@ _state: dict[str, Any] = {
     "ask_uuid": None,
     "ask_timeout_s": None,
     "ask_options": None,
+    "ask_cancellable": None,
     "updated_at": None,
 }
 _path: Optional[Path] = None

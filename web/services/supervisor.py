@@ -482,6 +482,7 @@ class RunHandle:
                     question=data.get("ask_question"),
                     timeout_s=data.get("ask_timeout_s"),
                     options=data.get("ask_options"),
+                    cancellable=data.get("ask_cancellable", True),
                 )
             )
         self._ask_pending = new_ask

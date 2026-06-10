@@ -79,7 +79,7 @@
     <span class="crumbs" x-show="ask.timeout_s">超时 <span x-text="ask.timeout_s"></span>s</span>
     <div style="display:flex; gap:8px;">
       <button class="btn primary" @click="answerAsk('completed')">提交 ✓</button>
-      <button class="btn" @click="answerAsk('cancelled')">取消</button>
+      <button class="btn" @click="answerAsk('cancelled')" x-show="ask.cancellable !== false">取消</button>
     </div>
   </div>
 

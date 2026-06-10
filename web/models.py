@@ -161,6 +161,7 @@ class AskPendingEvent(BaseModel):
     question: Optional[str] = None
     timeout_s: Optional[float] = None
     options: Optional[list[str]] = None
+    cancellable: bool = True
 
 
 class AuditEvent(BaseModel):

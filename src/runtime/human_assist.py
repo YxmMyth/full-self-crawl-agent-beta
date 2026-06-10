@@ -75,6 +75,7 @@ class HumanAssistGateway(ABC):
         question: str,
         timeout_s: float | None = None,
         options: list[str] | None = None,
+        cancellable: bool = True,
     ) -> HumanResponse:
         """Ask the human a question and return their typed-text answer.
 
@@ -88,6 +89,9 @@ class HumanAssistGateway(ABC):
         free-text input (à la Claude Code AskUserQuestion). The human can click
         an option OR type freely; either way message is the text. None = no
         suggested options, text input only.
+
+        cancellable: whether the console should show a cancel button. Default
+        True. Set to False for intake confirmation (cancel = kill run).
         """
         ...
 
@@ -241,6 +245,7 @@ class TerminalGateway(HumanAssistGateway):
         question: str,
         timeout_s: float | None = None,
         options: list[str] | None = None,
+        cancellable: bool = True,
     ) -> HumanResponse:
         """Print the question; read a typed answer from stdin (TTY) or a
         HUMAN_ANSWER file. Legacy path — containerized runs use WebGateway."""
@@ -514,6 +519,7 @@ class BrowserOverlayGateway(HumanAssistGateway):
         question: str,
         timeout_s: float | None = None,
         options: list[str] | None = None,
+        cancellable: bool = True,
     ) -> HumanResponse:
         """Not supported — the overlay is a button card, not a text input.
         Containerized runs use WebGateway; raise loudly rather than silently
@@ -722,6 +728,7 @@ class TkinterPopupGateway(HumanAssistGateway):
         question: str,
         timeout_s: float | None = None,
         options: list[str] | None = None,
+        cancellable: bool = True,
     ) -> HumanResponse:
         logger.info(f"Awaiting human ask (popup): {question[:80]}")
         loop = asyncio.get_event_loop()
@@ -879,6 +886,7 @@ class WebGateway(HumanAssistGateway):
         question: str,
         timeout_s: float | None = None,
         options: list[str] | None = None,
+        cancellable: bool = True,
     ) -> HumanResponse:
         """Text Q&A over the console. Mirrors request() but: no page (not a
         browser op), and the response carries the operator's typed answer.
@@ -886,8 +894,8 @@ class WebGateway(HumanAssistGateway):
         Flow (parallel to request()):
           1. write workspace/ask_request_{uuid}.json (durable record)
           2. raise to the console via status.json (ask_pending / ask_question /
-             ask_uuid / ask_timeout_s / ask_options) — supervisor surfaces it as
-             option buttons + text box
+             ask_uuid / ask_timeout_s / ask_options / ask_cancellable) — supervisor
+             surfaces it as option buttons + text box
           3. poll workspace/ask_response_{uuid}.json (the console writes it with
              {"status": "completed"|"cancelled", "message": "<answer>"})
           4. consume both files, clear the flags, return the answer in .message
@@ -922,6 +930,7 @@ class WebGateway(HumanAssistGateway):
             ask_uuid=ask_id,
             ask_timeout_s=timeout_s,
             ask_options=options,
+            ask_cancellable=cancellable,
         )
 
         logger.info(f"Awaiting human ask (web): {question[:80]} [{ask_id}]")
@@ -942,6 +951,7 @@ class WebGateway(HumanAssistGateway):
             ask_uuid=None,
             ask_timeout_s=None,
             ask_options=None,
+            ask_cancellable=None,
         )
         for f in (req_file, resp_file):
             try:
