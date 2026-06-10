@@ -5,17 +5,17 @@ prose, NOT a typed schema). It is WANT + evidence-standard + qualitative
 boundaries, pinned to disk BEFORE recon and later used as the auditor's
 measuring stick and the gate's calibration target.
 
-Judgment-driven clarification: after a compile, the LLM judges whether a genuine
-semantic ambiguity remains that would change WHAT COUNTS AS THE REAL DELIVERABLE
-(the kungal trap: "剧本 = real dialogue, or a synopsis?"). If so, it asks the
-human one specific question via the gateway, folds the answer in, and recompiles.
-There is NO fixed round cap — the human in the loop is the throttle (each round
-blocks on a real answer). FAIL-CLOSED: if a clarification is genuinely needed but
-no human answers, we hard-stop rather than run on a guessed requirement.
+Two-phase human alignment:
+  1. LLM compiles the requirement into a draft intent kernel.
+  2. The draft is ALWAYS shown to the human for confirmation — even when the
+     LLM thinks it's clear. This is the first alignment checkpoint. The human
+     can confirm (pin) or provide corrections (re-compile).
 
-Models on src/harvest/checklist.py:compile_checklist (one generate() call →
-markdown), but for the pre-recon intent (no samples/catalog yet) and fail-CLOSED
-(the harvest checklist's stub-fallback is deliberately NOT copied here).
+If the LLM detects a genuine semantic ambiguity during compile, it asks the
+human BEFORE showing the draft (so the draft already reflects the answer).
+
+FAIL-CLOSED: if a human confirmation is needed but no human answers, we
+hard-stop rather than run on an unconfirmed intent.
 """
 
 from __future__ import annotations
@@ -30,12 +30,14 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _CLARIFY_MARKER = "---CLARIFY---"
+_CONFIRM_OPT = "确认,没问题"
+_ADJUST_OPT = "要调整"
 
 
 class IntentIntakeError(RuntimeError):
     """Raised when an intent kernel cannot be established — an empty/garbage
-    compile, or a clarification is needed but no human is available. Fail-closed:
-    the run must NOT proceed on a guessed requirement."""
+    compile, or a human confirmation is needed but no human is available.
+    Fail-closed: the run must NOT proceed on an unconfirmed intent."""
 
 
 _COMPILE_SYSTEM_PROMPT = """你把一个自然语言的采集需求,编译成「意图内核」——用户真正要什么的稳定契约。后续的探索(recon)和完成核验(审计)都拿它当尺子,所以它必须把「什么算真东西」讲死。
@@ -72,6 +74,13 @@ _COMPILE_SYSTEM_PROMPT = """你把一个自然语言的采集需求,编译成「
 CLEAR 或 一行问题
 """
 
+_INTERPRET_SYSTEM = (
+    "用户看过了一段编好的意图内核,然后给了反馈。判断反馈的语义:\n"
+    "- 如果用户确认了(表示没问题、可以、ok、对、没意见等)→ 输出 CONFIRMED\n"
+    "- 如果用户给了任何修改意见、补充、纠正 → 输出 ADJUST\n"
+    "只输出一个词:CONFIRMED 或 ADJUST"
+)
+
 
 def _split_kernel(raw: str) -> tuple[str, str]:
     """Split the compile output into (kernel_markdown, verdict).
@@ -106,8 +115,7 @@ def _build_user_msg(requirement: str, clarifications: list[tuple[str, str]]) -> 
 
 
 def _pin(kernel: str, run_dir: Path) -> str:
-    """Write intent_kernel.md + a sha256 sidecar (tamper-evidence for the
-    auditor's 'verify unmodified' step) and return the kernel text."""
+    """Write intent_kernel.md + a sha256 sidecar and return the kernel text."""
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "intent_kernel.md").write_text(kernel, encoding="utf-8")
     sha = hashlib.sha256(kernel.encode("utf-8")).hexdigest()
@@ -119,6 +127,20 @@ def _pin(kernel: str, run_dir: Path) -> str:
     return kernel
 
 
+async def _is_confirmed(llm: Any, kernel: str, human_reply: str) -> bool:
+    """Use the LLM to judge whether the human's reply is a confirmation or a
+    modification request. Returns True if confirmed."""
+    prompt = (
+        f"编好的意图内核(已展示给用户):\n{kernel[:1500]}\n\n"
+        f"用户的回复:\n{human_reply}\n\n"
+        "判断:用户是确认了,还是要修改?"
+    )
+    result = await llm.generate(prompt=prompt, system=_INTERPRET_SYSTEM)
+    if not result:
+        return False
+    return "CONFIRMED" in result.upper()
+
+
 async def compile_intent_kernel(
     llm: Any,
     requirement: str,
@@ -127,11 +149,11 @@ async def compile_intent_kernel(
     *,
     domain: str = "",
 ) -> str:
-    """Compile `requirement` into a pinned intent kernel, clarifying with the
-    human when a genuine semantic ambiguity remains. Returns the kernel text.
+    """Compile `requirement` into a pinned intent kernel. The compiled draft is
+    ALWAYS shown to the human for confirmation (first alignment checkpoint).
 
-    Raises IntentIntakeError (fail-closed) on an empty/garbage compile, or when a
-    clarification is needed but no human answers.
+    Returns the confirmed kernel text.
+    Raises IntentIntakeError (fail-closed) on empty compile or no human available.
     """
     run_dir = Path(run_dir)
     clarifications: list[tuple[str, str]] = []
@@ -140,6 +162,7 @@ async def compile_intent_kernel(
     )
 
     while True:
+        # Phase 1: LLM compiles requirement + any prior clarifications into a kernel
         user_msg = _build_user_msg(requirement, clarifications)
         raw = await llm.generate(prompt=user_msg, system=_COMPILE_SYSTEM_PROMPT)
         if not raw or not raw.strip():
@@ -154,25 +177,58 @@ async def compile_intent_kernel(
                 f"intent-kernel compile produced no usable kernel; head: {raw[:200]!r}"
             )
 
-        if _is_clear(verdict):
+        # Phase 2: If LLM flagged a genuine ambiguity, ask BEFORE showing the draft
+        if not _is_clear(verdict):
+            question = verdict
+            logger.info(f"Intent intake needs clarification: {question[:160]}")
+            if gateway is None:
+                raise IntentIntakeError(
+                    f"intent clarification needed but no gateway: {question}"
+                )
+            resp = await gateway.ask(
+                question=f"[需求澄清] {question}", timeout_s=timeout_s
+            )
+            answer = (resp.message or "").strip() if resp is not None else ""
+            if resp is None or resp.status != "completed" or not answer:
+                raise IntentIntakeError(
+                    f"intent clarification needed but no human answered "
+                    f"(status={getattr(resp, 'status', 'none')}); refusing to run "
+                    f"on a guessed requirement. Question was: {question}"
+                )
+            clarifications.append((question, answer))
+            logger.info(f"Intent clarified: {answer[:160]}")
+            continue  # re-compile with the clarification folded in
+
+        # Phase 3: ALWAYS show the compiled kernel to the human for confirmation.
+        # This is the mandatory first alignment checkpoint — even if the LLM
+        # thought the requirement was unambiguous, the human must see and approve
+        # the compiled intent before recon starts.
+        logger.info("Intent kernel compiled, seeking human confirmation")
+        if gateway is None:
+            logger.warning("No gateway — auto-pinning intent kernel (no human confirm)")
             return _pin(kernel, run_dir)
 
-        # A genuine semantic ambiguity remains → ask the human (judgment-driven,
-        # no round cap; the human answering is the throttle).
-        question = verdict
-        logger.info(f"Intent intake needs clarification: {question[:160]}")
-        if gateway is None:
-            raise IntentIntakeError(
-                f"intent clarification needed but no gateway is configured: {question}"
-            )
-        resp = await gateway.ask(question=f"[需求澄清] {question}", timeout_s=timeout_s)
+        resp = await gateway.ask(
+            question=(
+                "我把你的需求编成了下面的意图内核。确认没问题,或者告诉我要改什么:\n\n"
+                f"{kernel}"
+            ),
+            timeout_s=timeout_s,
+            options=[_CONFIRM_OPT, _ADJUST_OPT],
+        )
         answer = (resp.message or "").strip() if resp is not None else ""
         if resp is None or resp.status != "completed" or not answer:
-            # No human / dismissed / timed out → fail closed. Do NOT guess.
             raise IntentIntakeError(
-                f"intent clarification needed but no human answered "
-                f"(status={getattr(resp, 'status', 'none')}); refusing to run on a "
-                f"guessed requirement. Question was: {question}"
+                "intent kernel requires human confirmation but no human answered "
+                f"(status={getattr(resp, 'status', 'none')}); refusing to run on "
+                "an unconfirmed intent."
             )
-        clarifications.append((question, answer))
-        logger.info(f"Intent clarified: {answer[:160]}")
+
+        # Use LLM to interpret the human's response semantically
+        if await _is_confirmed(llm, kernel, answer):
+            logger.info("Human confirmed intent kernel")
+            return _pin(kernel, run_dir)
+
+        # Human wants to adjust — fold their feedback as a clarification and re-compile
+        clarifications.append(("人看完后的反馈", answer))
+        logger.info(f"Human wants adjustment: {answer[:160]}, re-compiling")
