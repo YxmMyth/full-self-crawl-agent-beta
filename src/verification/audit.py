@@ -40,7 +40,10 @@ _MIN_ARTIFACT_FILES = 1  # samples/ + catalog/ combined
 
 # ── Recon criteria (folded into the auditor agent's briefing) ──────
 
-_RECON_CRITERIA = """## What to verify (recon is L1–L4 understanding + proof samples)
+_RECON_CRITERIA = """## Recon completion criteria (C1-C6) — THIS is your ruler
+
+Recon succeeds when harvest can take over without re-discovering basics.
+These six criteria define "exploration-complete", NOT "requirement-fulfilled".
 
 C1 — Site structure (L1): the semantic model describes URL PATTERNS and how
      pages connect ("/posts/{id}", "/api/v2/items?cursor="), not just single URLs.
@@ -52,7 +55,7 @@ C3 — Requirement mapping (L3): the World Model explicitly maps the requirement
      and nothing says where X lives, C3 fails.
 C4 — Proof samples are the RIGHT KIND (the kungal check — do this by READING):
      samples/ holds real primary-data instances whose CONTENT matches the intent
-     kernel's evidence-standard. Open them. A file that is the wrong kind of
+     evidence standard (see below). Open them. A file that is the wrong kind of
      thing (a plot summary when the deliverable is dialogue; a listing/metadata
      when the deliverable is the artifact) is a FAIL even if its size/format look
      fine. catalog/ entries (lists, IDs, URL maps) are NOT samples — they prove
@@ -222,16 +225,22 @@ def _build_recon_briefing(
     procedural: str,
     artifact_listing: str,
 ) -> str:
-    ruler = intent_kernel.strip() or (
-        f"(no compiled intent kernel found — fall back to the raw requirement)\n{requirement}"
+    evidence_standard = intent_kernel.strip() or (
+        f"(no compiled intent kernel — fall back to raw requirement)\n{requirement}"
     )
     return (
-        "# Mission intent kernel (YOUR RULER — anchor every judgment on the "
-        "evidence standard here)\n"
-        f"{ruler}\n\n"
-        f"# Original requirement (verbatim)\n{requirement}\n\n"
+        "# Recon completion criteria (YOUR RULER — exploration readiness for harvest)\n\n"
+        "Recon's job is NOT to fulfil the requirement — it is to EXPLORE enough "
+        "that harvest can take over without re-discovering basics. Judge against "
+        "the L1-L4 criteria below, NOT the full requirement.\n\n"
         f"{_RECON_CRITERIA}\n\n"
-        "# The World Model's CLAIMS (verify these against real evidence — do not "
+        f"# Original requirement (the ultimate harvest goal — context only)\n{requirement}\n\n"
+        "# Intent evidence standard (reference for C4 sample authenticity ONLY)\n"
+        "Use this ONLY to judge whether proof samples are the RIGHT KIND of thing "
+        "(real dialogue vs synopsis, real artifact vs metadata). Do NOT use it as "
+        "the overall completion bar — that is C1-C6 above.\n\n"
+        f"{evidence_standard}\n\n"
+        "# The World Model's CLAIMS (verify against real evidence — do not "
         "take them on faith; the worker wrote them)\n\n"
         f"## Semantic model\n{semantic or '(empty)'}\n\n"
         f"## Procedural model\n{procedural or '(empty)'}\n\n"

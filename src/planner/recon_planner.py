@@ -331,7 +331,11 @@ class ReconPlanner:
         # Planner's own conversation
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"Domain: {domain}\nRequirement: {requirement}"},
+            {"role": "user", "content": (
+                f"Domain: {domain}\n"
+                f"Requirement (the ultimate harvest goal — NOT your completion bar; "
+                f"your completion bar is L1-L4 + universe exploration): {requirement}"
+            )},
         ]
 
         # Counters for safety net
