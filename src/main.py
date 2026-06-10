@@ -168,28 +168,30 @@ async def run_harvest_only(domain: str, source_run_id: str | None) -> None:
 
 async def run_auto(domain: str, requirement: str, no_gate: bool) -> None:
     """End-to-end: recon → optional human gate → harvest."""
-    from src.cli.gate import ask_continue_to_harvest, open_requirement_for_edit
+    from src.cli.gate import run_gate
     from src.harvest.launcher import run_harvest
+    from src.llm.client import LLMClient
 
     # Phase 1: recon (sets Config.RUN_ID as a side effect)
     await run_explore(domain, requirement)
     source_run_id = Config.RUN_ID
 
     # Phase 2: human gate between recon and harvest
+    # The gate shows the strategy report + intent kernel and asks the operator
+    # to confirm or adjust before harvest begins (second alignment checkpoint).
     if not no_gate:
-        # Flag the gate as pending BEFORE the blocking read so the web console
-        # can render the gate banner (no-op unless HELMSMAN_RUN=1).
-        status_hook.set_phase("gate", gate_pending=True)
-        decision = ask_continue_to_harvest(domain)
-        status_hook.set_flag(gate_pending=False)
+        status_hook.set_phase("gate")
+        gateway = _select_gateway(Config.run_dir(domain))
+        llm = LLMClient()
+        try:
+            decision, requirement = await run_gate(domain, requirement, llm, gateway)
+        finally:
+            status_hook.set_flag(gate_pending=False)
+            await llm.close()
         if decision == "stop":
             logger.info("Operator chose to stop after recon. Skipping harvest.")
             status_hook.set_phase("done")
             return
-        if decision == "edit":
-            new_req = open_requirement_for_edit(domain)
-            logger.info(f"Requirement after edit: {new_req[:200]}")
-        # else: 'continue' → fall through
 
     # Phase 3: harvest against the same run_id
     await run_harvest(domain, source_run_id=source_run_id)

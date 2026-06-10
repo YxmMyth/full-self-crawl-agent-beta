@@ -2,19 +2,21 @@
 
 Recon writes a strategy_report.md when it finishes (see
 src/planner/recon_planner.py:_emit_strategy_report). This module shows
-that report to the operator and asks: continue to harvest, stop, or
-edit the requirement first.
+that report AND the current intent kernel to the operator, then asks:
+continue to harvest (with this intent) or adjust.
 
-Future replacements (Feishu webhook, web dashboard) implement the same
-contract: show report, get decision, optionally edit requirement.
+The gate is the second alignment checkpoint (after intake). Recon may have
+discovered things that change the picture (paid content, binary format, etc),
+so the operator reviews both the strategy report and the intent kernel before
+harvest begins. If adjustments are needed, the intent is re-compiled and
+re-pinned.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import time
+from typing import Any
 
 from src.config import Config
 from src.runtime import status_hook
@@ -25,118 +27,147 @@ logger = get_logger(__name__)
 
 _DECISION_CONTINUE = "continue"
 _DECISION_STOP = "stop"
-_DECISION_EDIT = "edit"
 
 
-def ask_continue_to_harvest(domain: str) -> str:
-    """Show the strategy report and ask the operator: y / N / edit.
+def _read_file(path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    except Exception:
+        return ""
 
-    Returns one of 'continue' / 'stop' / 'edit'.
+
+async def run_gate(
+    domain: str,
+    requirement: str,
+    llm: Any,
+    gateway: Any,
+) -> tuple[str, str]:
+    """Show strategy report + intent kernel, let the human confirm or adjust.
+
+    Returns (decision, requirement) where:
+      - decision = 'continue' or 'stop'
+      - requirement = the (possibly updated) requirement text
+
+    If the human adjusts the intent, re-compiles and re-pins intent_kernel.md.
     """
     run_dir = Config.run_dir(domain)
-    report_path = run_dir / "strategy_report.md"
-    req_path = run_dir / "requirement.txt"
+    report = _read_file(run_dir / "strategy_report.md")
+    intent_kernel = _read_file(run_dir / "intent_kernel.md")
 
+    # For Helmsman (containerized) path: use gateway.ask with structured options.
+    # For terminal (direct CLI) path: fall back to the console gate.
+    if gateway is not None and status_hook.enabled():
+        return await _gate_via_gateway(
+            domain, requirement, llm, gateway, report, intent_kernel
+        )
+
+    # Terminal fallback (legacy CLI path)
+    return _gate_terminal(domain, requirement, report, intent_kernel), requirement
+
+
+async def _gate_via_gateway(
+    domain: str,
+    requirement: str,
+    llm: Any,
+    gateway: Any,
+    report: str,
+    intent_kernel: str,
+) -> tuple[str, str]:
+    """Gate via the web console gateway (Helmsman path). Shows strategy report +
+    intent kernel; operator confirms or adjusts."""
+    run_dir = Config.run_dir(domain)
+
+    # Build the gate question showing both strategy report and intent
+    parts = ["Recon 完成。请检查 recon 发现和当前意图:\n"]
+    if report:
+        parts.append(f"## 策略报告\n{report[:2000]}\n")
+    if intent_kernel:
+        parts.append(f"## 当前意图内核\n{intent_kernel[:2000]}\n")
+    else:
+        parts.append("(没有意图内核 — intake 可能未运行)\n")
+    parts.append("确认继续 harvest,或者告诉我要调整什么。")
+
+    # First, raise the gate flag so the console shows the gate banner
+    status_hook.set_flag(gate_pending=True)
+
+    try:
+        resp = await gateway.ask(
+            question="\n".join(parts),
+            timeout_s=None,  # wait forever — gate is an explicit checkpoint
+            options=["继续 harvest", "要调整意图"],
+        )
+    finally:
+        status_hook.set_flag(gate_pending=False)
+
+    answer = (resp.message or "").strip() if resp else ""
+    if not answer or resp.status != "completed":
+        logger.info("Gate: no human answered, defaulting to stop")
+        return _DECISION_STOP, requirement
+
+    # Use LLM to interpret: continue or adjust?
+    interpret_prompt = (
+        f"用户在 recon→harvest 的检查点回复了:\n{answer}\n\n"
+        "判断:用户是要继续(确认当前意图没问题),还是要调整(修改意图/需求)?\n"
+        "只输出一个词:CONTINUE 或 ADJUST"
+    )
+    interpret = await llm.generate(
+        prompt=interpret_prompt,
+        system="判断用户在 gate 检查点的意图:CONTINUE(确认继续)或 ADJUST(要调整)。只输出一个词。",
+    )
+
+    if interpret and "ADJUST" in interpret.upper():
+        # Human wants to adjust — re-compile intent with their feedback
+        logger.info(f"Gate: human wants adjustment: {answer[:160]}")
+        from src.intake.kernel import compile_intent_kernel
+
+        # Add the human's adjustment as a clarification for the re-compile
+        adjusted_req = requirement  # keep original requirement
+        try:
+            await compile_intent_kernel(
+                llm, requirement, run_dir, gateway, domain=domain
+            )
+            logger.info("Gate: intent kernel re-compiled after adjustment")
+        except Exception as e:
+            logger.warning(f"Gate: re-compile failed, continuing with original: {e}")
+        return _DECISION_CONTINUE, adjusted_req
+
+    logger.info("Gate: human confirmed, continuing to harvest")
+    return _DECISION_CONTINUE, requirement
+
+
+def _gate_terminal(
+    domain: str,
+    requirement: str,
+    report: str,
+    intent_kernel: str,
+) -> str:
+    """Terminal fallback gate (non-Helmsman path)."""
     print("\n" + "=" * 60)
     print("  RECON COMPLETE")
     print("=" * 60)
     print(f"\nDomain:       {domain}")
-    if req_path.exists():
-        print(f"Requirement:  {req_path.read_text(encoding='utf-8').strip()}")
+    print(f"Requirement:  {requirement}")
     print(f"Run ID:       {Config.RUN_ID}")
 
-    if report_path.exists():
-        print(f"\nStrategy report ({report_path}):\n")
-        print(report_path.read_text(encoding="utf-8"))
+    if report:
+        print(f"\n--- Strategy Report ---\n{report}\n")
     else:
-        print(f"\n[!] Strategy report missing at {report_path}")
-        print("    Recon may have skipped report generation. Proceeding to ask anyway.")
+        print("\n[!] Strategy report missing.")
 
-    # Helmsman path: no stdin (the mission may be a docker-run subprocess with
-    # no attached pipe). Raise gate_pending via status.json and poll for the
-    # operator's decision file — the same cross-process signal-file pattern the
-    # WebGateway uses for human-assist. The console writes gate_response.json
-    # (supervisor.answer_gate) when the operator clicks continue / stop.
-    if status_hook.enabled():
-        return _await_gate_via_console(run_dir)
+    if intent_kernel:
+        print(f"--- Intent Kernel ---\n{intent_kernel}\n")
+    else:
+        print("[!] Intent kernel missing.\n")
 
-    print("\n" + "-" * 60)
+    print("-" * 60)
     while True:
         try:
-            ans = input("  Continue to harvest? [y/N/edit]: ").strip().lower()
+            ans = input("  Continue to harvest? [y/N]: ").strip().lower()
         except EOFError:
-            # Non-interactive — treat as stop
             print("  (no stdin — defaulting to stop)")
             return _DECISION_STOP
         if ans in ("y", "yes"):
             return _DECISION_CONTINUE
         if ans in ("", "n", "no"):
             return _DECISION_STOP
-        if ans == "edit":
-            return _DECISION_EDIT
-        print("  Please answer y / N / edit.")
-
-
-def _await_gate_via_console(run_dir) -> str:
-    """Block until the Helmsman operator answers the gate (continue / stop).
-
-    Mirrors WebGateway: set status.json gate_pending=True, then poll
-    workspace/gate_response.json. Waits indefinitely — the gate is an explicit
-    human checkpoint (use --no-gate for unattended runs). Returns 'continue' or
-    'stop' ('edit' is not offered by the web console).
-    """
-    workspace = run_dir / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    resp_file = workspace / "gate_response.json"
-    try:
-        resp_file.unlink()
-    except FileNotFoundError:
-        pass
-
-    status_hook.set_flag(gate_pending=True)
-    logger.info("Gate raised to console; awaiting operator decision (continue/stop).")
-    try:
-        while True:
-            if resp_file.exists():
-                try:
-                    data = json.loads(resp_file.read_text(encoding="utf-8"))
-                    decision = str(data.get("decision", _DECISION_STOP))
-                except Exception:
-                    decision = _DECISION_STOP
-                if decision not in (_DECISION_CONTINUE, _DECISION_STOP, _DECISION_EDIT):
-                    decision = _DECISION_STOP
-                logger.info(f"Gate decision from console: {decision}")
-                return decision
-            time.sleep(1.0)
-    finally:
-        status_hook.set_flag(gate_pending=False)
-        try:
-            resp_file.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def open_requirement_for_edit(domain: str) -> str:
-    """Open requirement.txt in $EDITOR (or fallback to manual edit).
-
-    Returns the requirement text after editing (stripped).
-    """
-    req_path = Config.run_dir(domain) / "requirement.txt"
-    editor = os.environ.get("EDITOR", "")
-    if editor:
-        try:
-            subprocess.run([editor, str(req_path)], check=False)
-        except FileNotFoundError:
-            print(f"\n[!] $EDITOR='{editor}' not found.")
-            print(f"    Manually edit: {req_path}")
-            try:
-                input("    Press Enter when done.")
-            except EOFError:
-                pass
-    else:
-        print(f"\n[!] No $EDITOR set. Manually edit: {req_path}")
-        try:
-            input("    Press Enter when done.")
-        except EOFError:
-            pass
-    return req_path.read_text(encoding="utf-8").strip()
+        print("  Please answer y / N.")
