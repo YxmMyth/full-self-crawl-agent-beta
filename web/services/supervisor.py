@@ -481,6 +481,7 @@ class RunHandle:
                     uuid=data.get("ask_uuid"),
                     question=data.get("ask_question"),
                     timeout_s=data.get("ask_timeout_s"),
+                    options=data.get("ask_options"),
                 )
             )
         self._ask_pending = new_ask

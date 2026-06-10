@@ -153,13 +153,14 @@ class AssistPendingEvent(BaseModel):
 
 class AskPendingEvent(BaseModel):
     """A text question (ask_human / intake / gate calibration) waiting on the
-    operator. Sibling to AssistPendingEvent; carries the question and expects a
-    typed answer back (vs assist's 完成/跳过 ack)."""
+    operator. Sibling to AssistPendingEvent; carries the question, suggested
+    options, and expects a typed answer back (vs assist's 完成/跳过 ack)."""
     type: Literal["ask_pending"] = "ask_pending"
     pending: bool
     uuid: Optional[str] = None
     question: Optional[str] = None
     timeout_s: Optional[float] = None
+    options: Optional[list[str]] = None
 
 
 class AuditEvent(BaseModel):

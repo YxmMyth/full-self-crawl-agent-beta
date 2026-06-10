@@ -59,13 +59,22 @@
     </div>
   </div>
 
-  <!-- Ask banner: a text question (ask_human / intake / gate calibration) — type a reply -->
+  <!-- Ask banner: a text question (ask_human / intake / gate calibration) — options + type a reply -->
   <div class="banner ask" x-show="askPending" x-cloak>
     <div class="grow">
       <div class="ttl">❓ 需要你回答</div>
       <div x-text="ask.question || '请在下方输入你的回答。'" style="white-space:pre-wrap;"></div>
+      <!-- Suggested options (click to select as answer) -->
+      <template x-if="ask.options && ask.options.length">
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin:8px 0;">
+          <template x-for="opt in ask.options" :key="opt">
+            <button class="btn opt-btn" @click="askMessage = opt; answerAsk('completed')"
+                    x-text="opt"></button>
+          </template>
+        </div>
+      </template>
       <input type="text" class="ask-input" x-model="askMessage"
-             placeholder="输入你的回答…" @keydown.enter="answerAsk('completed')">
+             placeholder="或者直接打字回答…" @keydown.enter="answerAsk('completed')">
     </div>
     <span class="crumbs" x-show="ask.timeout_s">超时 <span x-text="ask.timeout_s"></span>s</span>
     <div style="display:flex; gap:8px;">

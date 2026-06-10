@@ -74,6 +74,7 @@ class HumanAssistGateway(ABC):
         self,
         question: str,
         timeout_s: float | None = None,
+        options: list[str] | None = None,
     ) -> HumanResponse:
         """Ask the human a question and return their typed-text answer.
 
@@ -82,6 +83,11 @@ class HumanAssistGateway(ABC):
         no page is involved (intake / gate / auditor escalation call it with no
         browser at all). The answer text comes back in HumanResponse.message;
         status is "completed" (answered) / "cancelled" / "timeout".
+
+        options: suggested choices rendered as clickable buttons alongside a
+        free-text input (à la Claude Code AskUserQuestion). The human can click
+        an option OR type freely; either way message is the text. None = no
+        suggested options, text input only.
         """
         ...
 
@@ -234,6 +240,7 @@ class TerminalGateway(HumanAssistGateway):
         self,
         question: str,
         timeout_s: float | None = None,
+        options: list[str] | None = None,
     ) -> HumanResponse:
         """Print the question; read a typed answer from stdin (TTY) or a
         HUMAN_ANSWER file. Legacy path — containerized runs use WebGateway."""
@@ -250,6 +257,10 @@ class TerminalGateway(HumanAssistGateway):
         print("❓ HUMAN INPUT NEEDED", flush=True)
         print(bar, flush=True)
         print(f"Q: {question}", flush=True)
+        if options:
+            for i, opt in enumerate(options, 1):
+                print(f"  [{i}] {opt}", flush=True)
+            print("  (输入编号选择,或直接打字回答)", flush=True)
         if interactive:
             print("  → 在这个终端直接输入答案后回车", flush=True)
         else:
@@ -502,6 +513,7 @@ class BrowserOverlayGateway(HumanAssistGateway):
         self,
         question: str,
         timeout_s: float | None = None,
+        options: list[str] | None = None,
     ) -> HumanResponse:
         """Not supported — the overlay is a button card, not a text input.
         Containerized runs use WebGateway; raise loudly rather than silently
@@ -709,6 +721,7 @@ class TkinterPopupGateway(HumanAssistGateway):
         self,
         question: str,
         timeout_s: float | None = None,
+        options: list[str] | None = None,
     ) -> HumanResponse:
         logger.info(f"Awaiting human ask (popup): {question[:80]}")
         loop = asyncio.get_event_loop()
@@ -865,6 +878,7 @@ class WebGateway(HumanAssistGateway):
         self,
         question: str,
         timeout_s: float | None = None,
+        options: list[str] | None = None,
     ) -> HumanResponse:
         """Text Q&A over the console. Mirrors request() but: no page (not a
         browser op), and the response carries the operator's typed answer.
@@ -872,7 +886,8 @@ class WebGateway(HumanAssistGateway):
         Flow (parallel to request()):
           1. write workspace/ask_request_{uuid}.json (durable record)
           2. raise to the console via status.json (ask_pending / ask_question /
-             ask_uuid / ask_timeout_s) — supervisor surfaces it as a text box
+             ask_uuid / ask_timeout_s / ask_options) — supervisor surfaces it as
+             option buttons + text box
           3. poll workspace/ask_response_{uuid}.json (the console writes it with
              {"status": "completed"|"cancelled", "message": "<answer>"})
           4. consume both files, clear the flags, return the answer in .message
@@ -893,7 +908,7 @@ class WebGateway(HumanAssistGateway):
             req_file.write_text(
                 json.dumps(
                     {"uuid": ask_id, "question": question, "created_at": time.time(),
-                     "timeout_s": timeout_s},
+                     "timeout_s": timeout_s, "options": options},
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -906,6 +921,7 @@ class WebGateway(HumanAssistGateway):
             ask_question=question,
             ask_uuid=ask_id,
             ask_timeout_s=timeout_s,
+            ask_options=options,
         )
 
         logger.info(f"Awaiting human ask (web): {question[:80]} [{ask_id}]")
@@ -925,6 +941,7 @@ class WebGateway(HumanAssistGateway):
             ask_question=None,
             ask_uuid=None,
             ask_timeout_s=None,
+            ask_options=None,
         )
         for f in (req_file, resp_file):
             try:
