@@ -317,10 +317,15 @@ async def run_harvest(
     catalog_dir = run_dir / "catalog"
     checklist_path = workspace / "checklist.md"
     _, procedural_model = await db.load_both_models(domain)
+    intent_kernel_path = run_dir / "intent_kernel.md"
+    intent_kernel = None
+    if intent_kernel_path.is_file():
+        intent_kernel = intent_kernel_path.read_text(encoding="utf-8").strip() or None
     ok = await compile_checklist(
         llm, requirement, samples_dir, checklist_path,
         catalog_dir=catalog_dir,
         procedural_model=procedural_model,
+        intent_kernel=intent_kernel,
     )
     logger.info(
         f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: "

@@ -176,15 +176,19 @@ async def compile_checklist(
     output_path: Path,
     catalog_dir: Path | None = None,
     procedural_model: str | None = None,
+    intent_kernel: str | None = None,
 ) -> bool:
-    """Compile requirement + catalog + procedural model into checklist.md
-    via one LLM call. Output is qualitative criterion descriptions (no
-    bash check field — see module docstring for rationale).
+    """Compile requirement + intent kernel + catalog + procedural model into
+    checklist.md via one LLM call. Output is qualitative criterion descriptions
+    (no bash check field — see module docstring for rationale).
 
-    Writes to output_path. On failure, writes a minimal stub + returns
-    False (harvest mission proceeds with the stub criterion as the only
-    contract; agent will likely still mark_done with audit since data
-    coverage is provable).
+    When intent_kernel is provided (the normal case — pinned at intake, possibly
+    re-pinned at gate), the checklist is derived FROM it: the evidence standard
+    in the kernel defines what "the real thing" is, and the checklist expands
+    that into operational criteria. This ensures the two auditors (recon + harvest)
+    use the same standard.
+
+    Writes to output_path. On failure, writes a minimal stub + returns False.
     """
     sample_listing = "(no samples available)"
     sample_preview = ""
@@ -262,8 +266,19 @@ async def compile_checklist(
         else f"Procedural model (recon's how-to):\n{procedural_model[:4000]}"
     )
 
+    intent_section = ""
+    if intent_kernel and intent_kernel.strip():
+        intent_section = (
+            "## Intent kernel (YOUR PRIMARY REFERENCE — derive criteria from this)\n"
+            "The intent kernel defines WHAT the real deliverable is and what cheap\n"
+            "substitutes to reject. Your criteria MUST be consistent with its\n"
+            "evidence standard — do not contradict or weaken it.\n\n"
+            f"{intent_kernel.strip()}\n\n"
+        )
+
     user_msg = (
         f"Requirement (boundary, verbatim):\n{requirement}\n\n"
+        f"{intent_section}"
         f"{procedural_section}\n\n"
         f"Samples directory layout (read-only reference, at ../samples/ from workspace):\n"
         f"  shape: {samples_layout_desc}\n"
