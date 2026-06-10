@@ -158,27 +158,26 @@ async def handle(ctx: Any, **kwargs: Any) -> str:
 
 
 async def _adjudicate_uncertain(ctx: Any, result: Any) -> str:
-    """Auditor returned UNCERTAIN → escalate to a human and HOLD (never auto-PASS).
-    The human's typed answer is authoritative: an explicit accept → mission done;
-    anything else → feed it back. No human present → gateway.ask holds with no
-    timeout; if no gateway at all, return an UNCERTAIN message (don't pass)."""
-    import re
+    """Auditor returned UNCERTAIN → escalate to a human via shared adjudicator.
+    Accept → mission done; reject/feedback → feed back to agent."""
+    from src.runtime.adjudicate import adjudicate_uncertain
 
     gateway = getattr(ctx, "human_assist", None)
-    report = (getattr(result, "report", "") or result.feedback())[:1500]
-    question = (
-        "审计员拿不准 harvest 是否真的达标(很可能数据内容真伪 / 覆盖存疑)。它的判定:\n\n"
-        f"{report}\n\n"
-        "你来定:回复「通过」算完成;或说明哪里不对,让 agent 继续补。"
+    llm = getattr(ctx, "_llm", None)
+    report = getattr(result, "report", "") or result.feedback()
+
+    if llm is None:
+        return (
+            "VERIFICATION UNCERTAIN — auditor could not establish completion, and "
+            "no LLM is available to interpret human feedback. Address the audit "
+            f"report and call mark_done again.\n\n{result.feedback()[:2400]}"
+        )
+
+    accepted, answer = await adjudicate_uncertain(
+        llm, gateway, report, context_label="harvest"
     )
-    answer = ""
-    if gateway is not None:
-        try:
-            resp = await gateway.ask(question=question, timeout_s=None)  # hold for human
-            answer = (resp.message or "").strip() if resp else ""
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"UNCERTAIN escalation ask failed: {e}")
-    if answer and re.search(r"通过|pass|accept|\bok\b|可以|没问题|算过", answer, re.IGNORECASE):
+
+    if accepted:
         ctx._mission_done = True
         return (
             "VERIFICATION PASS (human-adjudicated UNCERTAIN) — operator confirmed "

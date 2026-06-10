@@ -708,29 +708,17 @@ class ReconPlanner:
         })
 
     async def _adjudicate_uncertain(self, result: Any) -> str:
-        """Auditor returned UNCERTAIN → escalate to a human and HOLD. The human's
-        typed answer is authoritative: an explicit accept → DONE; anything else →
-        feed it back as guidance and let recon continue. No human present →
-        gateway.ask holds with no timeout (we never auto-PASS an unproven result;
-        an unattended run parks here by design)."""
-        import re
+        """Auditor returned UNCERTAIN → escalate to a human via shared adjudicator.
+        Accept → DONE; reject/feedback → feed back to planner."""
+        from src.runtime.adjudicate import adjudicate_uncertain
 
         gateway = getattr(self.browser_manager, "gateway", None)
-        report = (getattr(result, "report", "") or result.feedback())[:1500]
-        question = (
-            "审计员拿不准 recon 是否真的达标(很可能样本种类 / 内容存疑)。它的判定:\n\n"
-            f"{report}\n\n"
-            "你来定:回复「通过」让它进入 gate;或说明哪里不对,让 agent 继续补。"
+        report = getattr(result, "report", "") or result.feedback()
+        accepted, answer = await adjudicate_uncertain(
+            self.llm, gateway, report, context_label="recon"
         )
-        answer = ""
-        if gateway is not None:
-            try:
-                resp = await gateway.ask(question=question, timeout_s=None)  # hold
-                answer = (resp.message or "").strip() if resp else ""
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"UNCERTAIN escalation ask failed: {e}")
-        if answer and re.search(r"通过|pass|accept|\bok\b|可以|没问题|算过", answer, re.IGNORECASE):
-            logger.info(f"Human adjudicated UNCERTAIN as PASS: {answer[:120]}")
+
+        if accepted:
             await self._emit_strategy_report(audit_result=result, blocked_reason=None)
             return json.dumps({
                 "status": "DONE", "outcome": "complete",
