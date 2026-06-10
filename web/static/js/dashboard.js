@@ -7,6 +7,39 @@
  * read it from outside the component.
  */
 
+/* ── Operator notification (tab flash + Web Notification) ── */
+let _titleFlashTimer = null;
+const _originalTitle = document.title;
+
+function _startTitleFlash(label) {
+  if (_titleFlashTimer) return;
+  let on = true;
+  _titleFlashTimer = setInterval(() => {
+    document.title = on ? `⚠ ${label}` : _originalTitle;
+    on = !on;
+  }, 1000);
+}
+
+function _stopTitleFlash() {
+  if (_titleFlashTimer) { clearInterval(_titleFlashTimer); _titleFlashTimer = null; }
+  document.title = _originalTitle;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) _stopTitleFlash();
+});
+
+function notifyOperator(title, body) {
+  _startTitleFlash(title);
+  if (Notification.permission === "granted") {
+    new Notification(title, { body, icon: "/static/favicon.ico" });
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then((p) => {
+      if (p === "granted") new Notification(title, { body, icon: "/static/favicon.ico" });
+    });
+  }
+}
+
 document.addEventListener("alpine:init", () => {
   Alpine.store("d", { connected: false });
 
@@ -47,10 +80,12 @@ document.addEventListener("alpine:init", () => {
       this.assistPending = !!state.assist_pending;
       this.askPending = !!state.ask_pending;
       this.steps = this._stepsFor(this.mode);
-      // ESC exits VNC fullscreen.
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape" && this.vncExpanded) this.vncExpanded = false;
       });
+      if ("Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+      }
       this.connect();
     },
 
@@ -115,19 +150,25 @@ document.addEventListener("alpine:init", () => {
         const i = arr.findIndex((a) => a.filename === d.filename);
         if (i >= 0) arr[i] = d; else arr.push(d);
       });
-      on("gate_pending", () => { this.gatePending = true; this.phase = "gate"; this.loadStrategy(); });
+      on("gate_pending", () => {
+        this.gatePending = true; this.phase = "gate"; this.loadStrategy();
+        if (document.hidden) notifyOperator("检查点", "Gate 等待你确认 — 继续还是停止?");
+      });
       on("assist_pending", (d) => {
         this.assistPending = !!d.pending;
         this.assist = d || {};
-        // Surface the live browser so the operator can act on the gate.
-        if (d.pending) { if (!this.vncConnected) this.toggleVnc(); this.vncExpanded = true; }
+        if (d.pending) {
+          if (!this.vncConnected) this.toggleVnc(); this.vncExpanded = true;
+          if (document.hidden) notifyOperator("需要介入", d.reason || "Agent 需要你在浏览器里操作");
+        }
       });
       on("ask_pending", (d) => {
-        // Text question (ask_human / intake / gate calibration). Unlike assist,
-        // it's not a browser op, so don't auto-open the VNC — just show the box.
         this.askPending = !!d.pending;
         this.ask = d || {};
-        if (d.pending) this.askMessage = "";
+        if (d.pending) {
+          this.askMessage = "";
+          if (document.hidden) notifyOperator("需要回答", (d.question || "").slice(0, 80) || "Agent 需要你回答一个问题");
+        }
       });
       on("audit", (d) => { this.audit = d; });
       on("log", (d) => {
@@ -172,27 +213,30 @@ document.addEventListener("alpine:init", () => {
     async gate(decision) {
       const fd = new FormData();
       fd.append("decision", decision);
-      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
+      fd.append("domain", this.domain || "");
       await fetch(this._ctl("gate"), { method: "POST", body: fd });
       this.gatePending = false;
+      _stopTitleFlash();
     },
     async answerAssist(status) {
       const fd = new FormData();
       fd.append("uuid", this.assist.uuid || "");
       fd.append("status", status);
-      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
+      fd.append("domain", this.domain || "");
       await fetch(this._ctl("assist"), { method: "POST", body: fd });
-      this.assistPending = false; // optimistic; status.json reconciles
+      this.assistPending = false;
+      _stopTitleFlash();
     },
     async answerAsk(status) {
       const fd = new FormData();
       fd.append("uuid", this.ask.uuid || "");
       fd.append("message", this.askMessage || "");
       fd.append("status", status);
-      fd.append("domain", this.domain || ""); // durable: answer needs no live handle
+      fd.append("domain", this.domain || "");
       await fetch(this._ctl("ask"), { method: "POST", body: fd });
-      this.askPending = false; // optimistic; status.json reconciles
+      this.askPending = false;
       this.askMessage = "";
+      _stopTitleFlash();
     },
     async stop() {
       if (!confirm("确定停止当前任务?")) return;
