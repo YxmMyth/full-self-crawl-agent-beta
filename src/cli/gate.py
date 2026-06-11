@@ -116,19 +116,41 @@ async def _gate_via_gateway(
     )
 
     if interpret and "ADJUST" in interpret.upper():
-        # Human wants to adjust — re-compile intent with their feedback
+        # Human wants to adjust — re-compile intent WITH their feedback seeded
+        # in (a from-scratch recompile would lose the adjustment text and ask
+        # them to confirm a kernel that doesn't reflect what they said).
         logger.info(f"Gate: human wants adjustment: {answer[:160]}")
         from src.intake.kernel import compile_intent_kernel
 
-        # Add the human's adjustment as a clarification for the re-compile
         adjusted_req = requirement  # keep original requirement
         try:
             await compile_intent_kernel(
-                llm, requirement, run_dir, gateway, domain=domain
+                llm, requirement, run_dir, gateway, domain=domain,
+                seed_clarifications=[("gate 检查点的人工调整", answer)],
+                pin_reason="gate adjustment",
             )
             logger.info("Gate: intent kernel re-compiled after adjustment")
         except Exception as e:
-            logger.warning(f"Gate: re-compile failed, continuing with original: {e}")
+            # The human asked for a change and it didn't land — don't silently
+            # continue on the old kernel. Surface it; they decide.
+            logger.warning(f"Gate: re-compile failed: {e}")
+            resp2 = await gateway.ask(
+                question=(
+                    f"意图重编失败({e})。你要的调整没有写进意图内核。"
+                    "用原意图继续 harvest,还是停止?"
+                ),
+                timeout_s=None,
+                options=["用原意图继续", "停止"],
+            )
+            ans2 = (resp2.message or "").strip() if resp2 is not None else ""
+            interp2 = ""
+            if ans2 and resp2.status == "completed":
+                interp2 = await llm.generate(
+                    prompt=f"用户回复:{ans2}\n判断:继续还是停止?",
+                    system="只输出一个词:CONTINUE 或 STOP。",
+                ) or ""
+            if "CONTINUE" not in interp2.upper():
+                return _DECISION_STOP, requirement
         return _DECISION_CONTINUE, adjusted_req
 
     logger.info("Gate: human confirmed, continuing to harvest")

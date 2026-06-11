@@ -47,7 +47,11 @@ from src.agent.tools import (
 )
 from src.browser.manager import BrowserManager
 from src.config import Config
-from src.harvest.checklist import compile_checklist
+from src.harvest.checklist import (
+    ChecklistCompileError,
+    compile_checklist,
+    is_conflict,
+)
 from src.harvest.prompt import HARVEST_SYSTEM_PROMPT
 from src.llm.client import LLMClient
 from src.runtime import status_hook
@@ -189,6 +193,116 @@ def _build_briefing(domain: str, requirement: str, run_dir: Path) -> str:
     )
 
 
+# ── Checklist compile with the v3 conflict protocol ─────
+
+
+async def _interpret_accept_or_stop(llm, conflict: str, answer: str) -> bool:
+    """LLM-semantic read of the operator's reply to a checklist conflict:
+    accept-the-substitute vs stop. No regex (「不接受」must not match 接受)."""
+    result = await llm.generate(
+        prompt=(
+            f"冲突说明:\n{conflict[:600]}\n\n用户的回复:\n{answer}\n\n"
+            "判断:用户是接受替代、继续任务,还是要停止?"
+        ),
+        system=(
+            "只输出一个词:ACCEPT(接受替代继续)或 STOP(停止)。"
+            "注意「不接受」「不行」「停」是 STOP。"
+        ),
+    )
+    return bool(result and "ACCEPT" in result.upper())
+
+
+async def _compile_checklist_fail_closed(
+    llm,
+    requirement: str,
+    samples_dir: Path,
+    checklist_path: Path,
+    *,
+    catalog_dir: Path,
+    procedural_model: str | None,
+    intent_kernel: str | None,
+    run_dir: Path,
+    domain: str,
+    gateway,
+) -> None:
+    """Compile the acceptance checklist; route compiler CONFLICTs to a human.
+
+    The compiler may refuse to write a checklist when the intent kernel's
+    evidence standard cannot be honestly verified from the available data
+    (the vndb failure: kernel rejected quote compilations, site only had
+    quotes, the compiler silently lowered the bar). On CONFLICT the human
+    decides: accept the substitute — the compromise is folded into a re-pinned
+    intent kernel v2 (human-confirmed) and we recompile — or stop (fail-closed).
+    The loop is bounded by the human: every round requires an answer.
+
+    LLM failure → one retry → propagate (fail-closed; no more silent stub).
+    """
+    timeout_s = (
+        Config.HUMAN_ASSIST_TIMEOUT_S if Config.HUMAN_ASSIST_TIMEOUT_S > 0 else None
+    )
+
+    async def _do_compile() -> str:
+        return await compile_checklist(
+            llm, requirement, samples_dir, checklist_path,
+            catalog_dir=catalog_dir,
+            procedural_model=procedural_model,
+            intent_kernel=intent_kernel,
+        )
+
+    conflict_round = 0
+    while True:
+        try:
+            text = await _do_compile()
+        except ChecklistCompileError as e:
+            logger.warning(f"Checklist compile failed ({e}); retrying once")
+            text = await _do_compile()  # 2nd failure propagates → run dies loudly
+
+        if not is_conflict(text):
+            return
+
+        conflict_round += 1
+        if gateway is None:
+            raise RuntimeError(
+                f"checklist conflict but no human channel available — fail closed. "
+                f"Conflict: {text[:400]}"
+            )
+        prefix = (
+            f"[验收冲突 · 第{conflict_round}次]" if conflict_round > 1 else "[验收冲突]"
+        )
+        resp = await gateway.ask(
+            question=(
+                f"{prefix} 清单编译器判断:现有数据满足不了意图内核的证据标准,"
+                f"拒绝产出验收清单。\n\n{text[:1500]}\n\n"
+                "你来定:接受现有数据作为替代(这个妥协会写进意图内核、"
+                "出新版本后继续),还是停止任务?"
+            ),
+            timeout_s=timeout_s,
+            options=["接受替代,继续", "停止任务"],
+        )
+        answer = (resp.message or "").strip() if resp is not None else ""
+        if resp is None or resp.status != "completed" or not answer:
+            raise RuntimeError(
+                "checklist conflict needs a human decision but none arrived — "
+                f"fail closed. Conflict: {text[:400]}"
+            )
+        if not await _interpret_accept_or_stop(llm, text, answer):
+            raise RuntimeError(
+                f"operator stopped at checklist conflict: {answer[:200]}"
+            )
+
+        # Accepted: fold the compromise into a re-pinned kernel v2 (the human
+        # confirms the new draft inside compile_intent_kernel), then recompile.
+        from src.intake.kernel import compile_intent_kernel
+
+        intent_kernel = await compile_intent_kernel(
+            llm, requirement, run_dir, gateway, domain=domain,
+            seed_clarifications=[
+                (f"验收清单编译冲突:{text[:600]}", f"操作员批准接受替代:{answer}"),
+            ],
+            pin_reason=f"checklist conflict compromise (round {conflict_round})",
+        )
+
+
 # ── Safety net watchdog ──────────────────────────────────
 
 
@@ -321,16 +435,25 @@ async def run_harvest(
     intent_kernel = None
     if intent_kernel_path.is_file():
         intent_kernel = intent_kernel_path.read_text(encoding="utf-8").strip() or None
-    ok = await compile_checklist(
-        llm, requirement, samples_dir, checklist_path,
-        catalog_dir=catalog_dir,
-        procedural_model=procedural_model,
-        intent_kernel=intent_kernel,
-    )
-    logger.info(
-        f"Checklist {'compiled' if ok else 'STUB written (LLM compile failed)'}: "
-        f"{checklist_path}"
-    )
+    try:
+        await _compile_checklist_fail_closed(
+            llm, requirement, samples_dir, checklist_path,
+            catalog_dir=catalog_dir,
+            procedural_model=procedural_model,
+            intent_kernel=intent_kernel,
+            run_dir=run_dir,
+            domain=domain,
+            gateway=browser_manager.gateway,
+        )
+    except BaseException:
+        # Fail-closed exit before the session ever starts — release resources
+        # (the session-level try/finally below hasn't been entered yet).
+        status_hook.set_phase("blocked")
+        await browser_manager.close()
+        await llm.close()
+        await db.close()
+        raise
+    logger.info(f"Checklist ready: {checklist_path}")
 
     # Hash-pin the compiled checklist. mark_done verifies the on-disk file
     # against this sha256 before invoking the audit — any agent edit (even

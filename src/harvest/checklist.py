@@ -50,6 +50,13 @@ class Criterion:
 # Parser regexes — tolerant to spacing variants
 _HEADER_RE = re.compile(r"^##\s+(C\d+)[.\s]+(.+?)\s*$")
 _FIELD_RE = re.compile(r"^\*\*(\w+)\*\*:\s*(.+?)\s*$")
+_CONFLICT_RE = re.compile(r"^\W{0,3}CONFLICT\s*:", re.IGNORECASE)
+
+
+def is_conflict(text: str) -> bool:
+    """True if a compile_checklist return value is the compiler's CONFLICT
+    escape (kernel evidence standard unsatisfiable from the available data)."""
+    return bool(text and _CONFLICT_RE.match(text.strip()))
 
 
 def parse_checklist(text: str) -> list[Criterion]:
@@ -108,7 +115,29 @@ verifier (an LLM auditor at mark_done time) evaluates each criterion against \
 actual on-disk evidence — file listings, content spot-checks, samples-vs-data \
 diffs. Your job is to specify WHAT counts as done, not HOW to test it.
 
-Output format (strict):
+## Satisfiability check (do this FIRST, before writing anything)
+
+When an intent kernel is provided, check: can its EVIDENCE STANDARD be honestly \
+verified against the KIND of data actually available (the samples/catalog shown \
+below)? Two outcomes:
+
+- The available data IS the real deliverable per the evidence standard → compile \
+the checklist normally.
+- The available data matches a substitute the kernel explicitly REJECTS, or is \
+simply not the kind of thing the kernel demands → do NOT write a checklist. \
+Output a single block starting with `CONFLICT:` that quotes the kernel's \
+rejection and states what the samples actually are (with a short excerpt). \
+Nothing else.
+
+The one output you must NEVER produce is a checklist that quietly lowers the \
+bar to fit the available data — dropping the kernel's rejection clauses, \
+rewording "complete X" into "some X", accepting the substitute because it is \
+what exists. If honest criteria would fail the available data, that is exactly \
+what CONFLICT is for: a human will decide whether to accept the substitute \
+(re-versioning the intent) or stop. Narrowing SCOPE via catalog (how many) is \
+fine; narrowing the KIND of deliverable below the evidence standard is not.
+
+Output format when compiling (strict):
 
 # Acceptance Checklist
 
@@ -169,6 +198,13 @@ WHAT counts as acceptance evidence.
 Output ONLY the markdown. No preamble, no commentary."""
 
 
+class ChecklistCompileError(RuntimeError):
+    """Raised when the checklist cannot be compiled (LLM failure / unusable
+    output). FAIL-CLOSED: the old behavior wrote a weak stub and continued —
+    the auditor then verified against a contract that wasn't the contract.
+    No checklist, no harvest."""
+
+
 async def compile_checklist(
     llm,
     requirement: str,
@@ -177,7 +213,7 @@ async def compile_checklist(
     catalog_dir: Path | None = None,
     procedural_model: str | None = None,
     intent_kernel: str | None = None,
-) -> bool:
+) -> str:
     """Compile requirement + intent kernel + catalog + procedural model into
     checklist.md via one LLM call. Output is qualitative criterion descriptions
     (no bash check field — see module docstring for rationale).
@@ -188,7 +224,14 @@ async def compile_checklist(
     that into operational criteria. This ensures the two auditors (recon + harvest)
     use the same standard.
 
-    Writes to output_path. On failure, writes a minimal stub + returns False.
+    Returns:
+      - the compiled checklist markdown (also written to output_path), OR
+      - a "CONFLICT: ..." string (nothing written) when the compiler judges the
+        kernel's evidence standard cannot be honestly verified from the data
+        actually available — the caller must route this to a human.
+
+    Raises ChecklistCompileError on LLM failure / unusable output (fail-closed;
+    the old write-a-stub-and-continue path is gone).
     """
     sample_listing = "(no samples available)"
     sample_preview = ""
@@ -293,37 +336,31 @@ async def compile_checklist(
         f"No bash commands."
     )
 
-    try:
-        response = await llm.generate(prompt=user_msg, system=_COMPILE_SYSTEM_PROMPT)
-        if not response or not response.strip():
-            raise RuntimeError("LLM returned empty checklist")
-        if "## " not in response:
-            raise RuntimeError(
-                f"LLM output has no ## sections; first 200 chars: {response[:200]!r}"
-            )
-        # Sanity: parse it once to confirm it produces at least 1 criterion
-        parsed = parse_checklist(response)
-        if not parsed:
-            raise RuntimeError(
-                f"LLM output parses to 0 criteria; first 300 chars: {response[:300]!r}"
-            )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(response, encoding="utf-8")
-        logger.info(
-            f"Checklist compiled to {output_path} ({len(response)} chars, "
-            f"{len(parsed)} criteria)"
+    response = await llm.generate(prompt=user_msg, system=_COMPILE_SYSTEM_PROMPT)
+    if not response or not response.strip():
+        raise ChecklistCompileError("LLM returned empty checklist")
+    text = response.strip()
+
+    # The compiler's escape hatch: it judged the kernel unsatisfiable from the
+    # available data. Nothing is written — the caller routes this to a human.
+    if is_conflict(text):
+        logger.warning(f"Checklist compile flagged CONFLICT: {text[:300]}")
+        return text
+
+    if "## " not in text:
+        raise ChecklistCompileError(
+            f"LLM output has no ## sections; first 200 chars: {text[:200]!r}"
         )
-        return True
-    except Exception as e:
-        logger.warning(f"Checklist compilation failed: {e}; writing stub")
-        stub = (
-            "# Acceptance Checklist (STUB — LLM compilation failed)\n\n"
-            f'Generated from requirement: "{requirement}"\n\n'
-            f"Compilation error: {e}\n\n"
-            "## C1. Workspace produces output\n"
-            "**criterion**: workspace/data/ contains at least one non-empty file "
-            "with content that plausibly satisfies the requirement boundary above.\n"
+    # Sanity: parse it once to confirm it produces at least 1 criterion
+    parsed = parse_checklist(text)
+    if not parsed:
+        raise ChecklistCompileError(
+            f"LLM output parses to 0 criteria; first 300 chars: {text[:300]!r}"
         )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(stub, encoding="utf-8")
-        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    logger.info(
+        f"Checklist compiled to {output_path} ({len(text)} chars, "
+        f"{len(parsed)} criteria)"
+    )
+    return text

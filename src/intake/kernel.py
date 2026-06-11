@@ -114,17 +114,30 @@ def _build_user_msg(requirement: str, clarifications: list[tuple[str, str]]) -> 
     return "\n".join(parts)
 
 
-def _pin(kernel: str, run_dir: Path) -> str:
-    """Write intent_kernel.md + a sha256 sidecar and return the kernel text."""
+def _pin(kernel: str, run_dir: Path, reason: str = "initial intake") -> str:
+    """Write intent_kernel.md + a sha256 sidecar and return the written text.
+
+    Re-pinning (gate adjustment / conflict compromise) archives the previous
+    version to intent_kernel.prev.md and records why this version exists in a
+    trailing comment — one level of history, not a version system."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "intent_kernel.md").write_text(kernel, encoding="utf-8")
-    sha = hashlib.sha256(kernel.encode("utf-8")).hexdigest()
+    kpath = run_dir / "intent_kernel.md"
+    if kpath.is_file():
+        try:
+            (run_dir / "intent_kernel.prev.md").write_text(
+                kpath.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    text = f"{kernel}\n\n<!-- pinned: {reason} -->"
+    kpath.write_text(text, encoding="utf-8")
+    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     (run_dir / "intent_kernel.sha256").write_text(sha, encoding="utf-8")
     logger.info(
-        f"Intent kernel pinned: {run_dir / 'intent_kernel.md'} "
-        f"({len(kernel)} chars, sha={sha[:12]})"
+        f"Intent kernel pinned ({reason}): {kpath} "
+        f"({len(text)} chars, sha={sha[:12]})"
     )
-    return kernel
+    return text
 
 
 async def _is_confirmed(llm: Any, kernel: str, human_reply: str) -> bool:
@@ -148,15 +161,22 @@ async def compile_intent_kernel(
     gateway: Any,
     *,
     domain: str = "",
+    seed_clarifications: list[tuple[str, str]] | None = None,
+    pin_reason: str = "initial intake",
 ) -> str:
     """Compile `requirement` into a pinned intent kernel. The compiled draft is
     ALWAYS shown to the human for confirmation (first alignment checkpoint).
+
+    seed_clarifications: (question, answer) pairs folded into the compile from
+    the start — used by re-pin paths (gate adjustment, checklist conflict) so
+    the human-approved compromise is written into the new version instead of
+    being lost on a from-scratch recompile.
 
     Returns the confirmed kernel text.
     Raises IntentIntakeError (fail-closed) on empty compile or no human available.
     """
     run_dir = Path(run_dir)
-    clarifications: list[tuple[str, str]] = []
+    clarifications: list[tuple[str, str]] = list(seed_clarifications or [])
     timeout_s = (
         Config.HUMAN_ASSIST_TIMEOUT_S if Config.HUMAN_ASSIST_TIMEOUT_S > 0 else None
     )
@@ -207,7 +227,7 @@ async def compile_intent_kernel(
         logger.info("Intent kernel compiled, seeking human confirmation")
         if gateway is None:
             logger.warning("No gateway — auto-pinning intent kernel (no human confirm)")
-            return _pin(kernel, run_dir)
+            return _pin(kernel, run_dir, pin_reason)
 
         resp = await gateway.ask(
             question=(
@@ -229,7 +249,7 @@ async def compile_intent_kernel(
         # Use LLM to interpret the human's response semantically
         if await _is_confirmed(llm, kernel, answer):
             logger.info("Human confirmed intent kernel")
-            return _pin(kernel, run_dir)
+            return _pin(kernel, run_dir, pin_reason)
 
         # Human wants to adjust — fold their feedback as a clarification and re-compile
         clarifications.append(("人看完后的反馈", answer))
