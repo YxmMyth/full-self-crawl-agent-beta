@@ -253,6 +253,9 @@ def main() -> None:
     try:
         if args.mode == "explore":
             asyncio.run(run_explore(args.domain, args.requirement))
+            # Close the phase lifecycle for explore-only runs (auto mode's
+            # phase is closed by gate-stop or by run_harvest's outcome).
+            status_hook.set_phase("done")
         elif args.mode == "harvest":
             asyncio.run(run_harvest_only(args.domain, args.from_run))
         elif args.mode == "auto":

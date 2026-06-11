@@ -388,13 +388,18 @@ async def run_harvest(
         await db.close()
         logger.info("All resources cleaned up")
 
-    # Summarize outcome to caller
+    # Summarize outcome to caller + close out the status.json phase lifecycle.
+    # Without this the console shows a finished run as forever "harvest"
+    # (set_phase("done") used to exist only on the gate-stop path).
     if result["outcome"] == OUTCOME_DONE:
+        status_hook.set_phase("done")
         logger.info(f"Harvest PASS: {session_id} in {result['steps_taken']} steps")
     elif result["outcome"] == OUTCOME_SAFETY:
         reason = getattr(ctx, "_safety_reason", "unknown")
+        status_hook.set_phase("blocked")
         logger.warning(f"Harvest stopped by safety net: {reason}")
     else:
+        status_hook.set_phase("blocked")
         logger.warning(f"Harvest ended without PASS: {result['outcome']}")
 
     return result
