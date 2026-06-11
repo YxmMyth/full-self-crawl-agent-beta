@@ -35,6 +35,18 @@ _MAX_ROUNDS = 14
 _READ_LIMIT = 12000  # max chars returned per read_file (tail-truncate beyond)
 _GREP_HITS = 60
 
+# Pushback when the auditor declares PASS without ever opening a file. The whole
+# threat model (synopsis-vs-real-deliverable) turns on reading CONTENT, so a
+# verdict reached purely from the briefing's listings/numbers cannot stand.
+_NO_READ_PUSHBACK = (
+    "You returned PASS without ever opening a file this session (no read_file or "
+    "grep). You CANNOT certify the deliverable is real without reading its CONTENT "
+    "— a synopsis and a real script are identical by size and listing; only the "
+    "words inside tell them apart. Open the actual files now, read enough of each "
+    "to judge it against the evidence standard, quote the supporting lines, then "
+    "give your verdict. If you genuinely cannot read them, OVERALL: UNCERTAIN."
+)
+
 
 _AUDITOR_SYSTEM_PROMPT = """You are an adversarial completion auditor. A worker agent claims its mission is done. You decide PASS / FAIL / UNCERTAIN by checking the ACTUAL produced files against the mission's intent and acceptance criteria — never the worker's say-so (you cannot even see the worker's reasoning).
 
@@ -237,6 +249,8 @@ async def run_audit_agent(
     ]
 
     report = ""
+    content_reads = 0      # read_file / grep executions — proof it opened files
+    nudged_no_read = False
     for _ in range(max_rounds):
         response = await llm.chat_with_tools(messages, _TOOLS_SCHEMA)
         if response is None:
@@ -244,6 +258,18 @@ async def run_audit_agent(
         messages.append(response.to_assistant_message())
 
         if not response.tool_calls:
+            # Natural stop. But a PASS reached without ever reading a file is the
+            # rubber-stamp failure: a synopsis and a real script are identical by
+            # size/listing — only CONTENT distinguishes them. Nudge once to force
+            # a real read; the end-of-function gate below is the hard backstop.
+            if (
+                parse_overall(response.text) == "PASS"
+                and content_reads == 0
+                and not nudged_no_read
+            ):
+                nudged_no_read = True
+                messages.append({"role": "user", "content": _NO_READ_PUSHBACK})
+                continue
             report = response.text
             break
 
@@ -252,8 +278,10 @@ async def run_audit_agent(
             if tc.name == "list_dir":
                 result = _handle_list_dir(run_dir, a.get("path", "."))
             elif tc.name == "read_file":
+                content_reads += 1
                 result = _handle_read_file(run_dir, a.get("path", ""))
             elif tc.name == "grep":
+                content_reads += 1
                 result = _handle_grep(run_dir, a.get("pattern", ""), a.get("path", "."))
             elif tc.name == "think":
                 result = a.get("thought", "")
@@ -276,8 +304,24 @@ async def run_audit_agent(
             report = synth.text
 
     overall = parse_overall(report)
+    # Hard fail-closed gate (covers natural-stop-after-nudge AND round-cap paths):
+    # never certify PASS if the auditor never opened a single file. This verifies a
+    # boolean fact (did it call read_file/grep?), not semantics — it cannot misfire
+    # on a real read, and closes the "rubber-stamp without reading" escape hatch.
+    if overall == "PASS" and content_reads == 0:
+        logger.warning(
+            "Audit agent returned PASS with zero content reads → forcing UNCERTAIN"
+        )
+        overall = "UNCERTAIN"
+        report = (report or "") + (
+            "\n\n[auditor gate] Verdict overridden to UNCERTAIN: PASS was reached "
+            "without opening any file (no read_file/grep), so completion is unproven."
+        )
     if not report:
         report = "(auditor produced no verdict text)"
         overall = "UNCERTAIN"
-    logger.info(f"Audit agent verdict: {overall} (report {len(report)} chars)")
+    logger.info(
+        f"Audit agent verdict: {overall} "
+        f"(report {len(report)} chars, {content_reads} content reads)"
+    )
     return overall, report
