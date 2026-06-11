@@ -83,6 +83,16 @@ you're stopping work, or because the planner narrative reads plausibly. \
 mark_done is verified, not narrated.
 - Do NOT redefine success around what already exists. If the requirement \
 names data you haven't located, you are not done — keep working.
+- EXCEPTION — evidence-backed absence: if exploration establishes that the \
+requirement's target does NOT exist on this source, that is a legitimate \
+completion finding, not a failure. The bar is definitive evidence recorded \
+in the Model: the site's own docs/schema saying so, a complete catalog the \
+target provably isn't in, or an exhausted documented search (queries tried \
++ result counts). Then document the nearest thing that DOES exist, clearly \
+labeled as a substitute — never silently presented as the target — and \
+call mark_done(status='complete'). The audit verifies the absence evidence; \
+the human gate decides accept-substitute-or-stop. "I searched and didn't \
+find it" without recorded evidence is NOT absence.
 
 mark_done(status='complete') triggers a two-phase audit:
   Phase 1 — mechanical sanity (semantic.md > 200 chars, procedural.md > 200 \

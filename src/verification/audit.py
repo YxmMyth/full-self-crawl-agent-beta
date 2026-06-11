@@ -51,15 +51,25 @@ C2 — Data distribution (L2): each significant location has an observation of
      WHAT data lives there (type, fields, rough volume) — field names / sample
      shape, not just "has items".
 C3 — Requirement mapping (L3): the World Model explicitly maps the requirement's
-     target data to a location/pattern/endpoint. If the requirement asks for X
-     and nothing says where X lives, C3 fails.
+     target data to a location/pattern/endpoint — OR establishes, with definitive
+     RECORDED evidence, that the target does NOT exist on this source and names
+     the nearest thing that does. Valid absence evidence: the site's own docs or
+     schema stating the data type is not offered; a complete enumerable catalog
+     in which the target provably does not appear; an exhaustive documented
+     search (queries tried + result counts). "Searched, didn't find it" with no
+     recorded evidence is NOT absence — that is C3 FAIL. An evidence-backed
+     absence finding PASSES C3: it is exactly what the human gate needs to
+     decide accept-substitute-or-stop.
 C4 — Proof samples are the RIGHT KIND (the kungal check — do this by READING):
      samples/ holds real primary-data instances whose CONTENT matches the intent
      evidence standard (see below). Open them. A file that is the wrong kind of
      thing (a plot summary when the deliverable is dialogue; a listing/metadata
      when the deliverable is the artifact) is a FAIL even if its size/format look
      fine. catalog/ entries (lists, IDs, URL maps) are NOT samples — they prove
-     WHERE data is, not THAT the real thing was extracted.
+     WHERE data is, not THAT the real thing was extracted. Exception: if C3
+     established evidence-backed absence, C4 instead checks the samples are
+     honestly labeled as the documented nearest-available alternative — passing
+     a substitute off AS the target remains a FAIL.
 C5 — Scalability: the procedural model documents a REUSABLE method (API+cursor,
      a fetch script, a generalizing browser_eval snippet) — not "click each item".
 C6 — Universe (harvest hand-off): catalog/ enumerates the universe (every entity
