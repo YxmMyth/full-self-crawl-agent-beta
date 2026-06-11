@@ -93,6 +93,29 @@ python -m src.main explore <domain> "<requirement>"            # recon only
 python -m src.main harvest <domain> --from-run <run_id>        # harvest only
 ```
 
+### Containerized deployment (Helmsman web console)
+
+The CLI above runs one mission in your shell. For a shared, multi-user setup —
+each run in its own disposable container, a web console with live progress and
+an interactive VNC into the browser (for login/CAPTCHA), human gates and
+audit-uncertain prompts surfaced in the page — use **Helmsman**:
+
+```bash
+# 1. build the per-run image (Camoufox + Xvfb/noVNC + code, ~4GB)
+docker build -f docker/run.Dockerfile -t fsc-run:dev .
+
+# 2. set HELMSMAN_CONTAINERIZED=1 in .env (+ HELMSMAN_PORT), then start the console
+python -m web
+
+# 3. reach it over an SSH tunnel (the console binds 127.0.0.1, no auth)
+ssh -L 8080:127.0.0.1:8080 <server>   # then open http://localhost:8080
+```
+
+Each launched mission becomes a `docker run --rm fsc-run:dev ...`; the console
+proxies its noVNC so you can watch and act on the live browser. Full guide —
+build, PostgreSQL, systemd, multi-user, env vars, ops — in
+[`docs/部署到服务器.md`](docs/部署到服务器.md).
+
 ---
 
 ## Architecture
@@ -283,6 +306,8 @@ Design docs live under `docs/` and are organized by area:
 | `docs/抽象边界原则.md` | Agent vs Infrastructure boundary — what to expose / hide |
 | `docs/SystemPrompts设计.md` | System prompt structure per agent layer |
 | `docs/three_missions_observations.md` | Latest E2E run log — 3 missions (chemrxiv / 66rpg / xmind) |
+| `docs/部署到服务器.md` | **Containerized deployment** — Helmsman console, Docker, systemd, multi-user, ops |
+| `docs/意图链v3设计.md` | Intent chain v3 — intake → recon → gate → checklist → harvest → audit, conflict escapes |
 | `docs/部门部署架构_local-recon_server-harvest.md` | Deployment direction discussion |
 | `docs/agent_stress_test_candidates.md` | Candidate stress-test targets sourced from internal needs |
 
