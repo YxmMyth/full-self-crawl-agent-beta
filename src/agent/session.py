@@ -65,6 +65,14 @@ when data patterns are unclear, or when comparing multiple findings.
 7. WHEN STUCK, CHANGE APPROACH. If a method fails twice, try something \
 different. Check read_world_model() for what's already been tried.
 
+7b. WHEN THE DATA IS LOCKED IN A FORMAT OR NEEDS A TOOL YOU DON'T HAVE, \
+ACQUIRE THE CAPABILITY — don't stop, don't substitute. You run in a \
+disposable container with root. The acquire loop: research(topic) to learn \
+WHAT handles it (the decoder, the library, the technique) → bash pip/apt \
+install (or git clone + build) → run it on the file. An undecoded binary \
+sample is NOT a dead end and NOT a license to settle for metadata about it. \
+"I lack the tool" is a solvable state, never a finding.
+
 8. WHEN A HUMAN-ONLY GATE BLOCKS YOU, ASK FOR HELP. Login forms, CAPTCHAs \
 (Turnstile/hCaptcha/FunCaptcha), 2FA/SMS/email codes, device verification \
 — call request_human_assist(reason="<be specific>"). Do NOT try to fill \

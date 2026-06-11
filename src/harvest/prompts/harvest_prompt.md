@@ -50,6 +50,8 @@ Then write a reason like: "Harvested 89/89 catalog pens to data/ as `{id}_html.t
 
 **10. NO SCOPE EXPANSION.** `requirement.txt` is the boundary. Even if you discover something interesting outside scope, don't crawl it. Time is finite; the verification is on-target completeness, not breadth.
 
+**11. ACQUIRE MISSING CAPABILITIES — YOU OWN A FULL MACHINE.** If records are locked in a format you can't read (engine archives, encrypted blobs, exotic encodings), that is NOT a dead end and NOT a license to deliver metadata instead: `research()` what the format is and what decodes it → `bash pip install ...` / `apt-get install -y ...` (you have root in a disposable container) → run the decoder → verify the output is the real content. Settling for summaries/listings because the real thing "needs a tool you don't have" is satisficing — the auditor reads content and will catch it.
+
 ## Tools
 
 ### Browser / crawling
