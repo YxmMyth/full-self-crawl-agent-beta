@@ -167,8 +167,10 @@ class AskPendingEvent(BaseModel):
 class AuditEvent(BaseModel):
     type: Literal["audit"] = "audit"
     round: int = 1
-    overall: str = ""  # PASS | BLOCKED
+    kind: str = ""  # recon | harvest
+    overall: str = ""  # PASS | FAIL | UNCERTAIN
     blocking_summary: str = ""
+    report: str = ""  # auditor's verdict text — surfaces PASS-with-caveats on the panel
 
 
 class LogEvent(BaseModel):

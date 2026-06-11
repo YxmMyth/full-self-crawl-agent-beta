@@ -487,25 +487,45 @@ class RunHandle:
             )
         self._ask_pending = new_ask
 
+    _AUDIT_MD_RE = re.compile(r"^(harvest_round|round)_(\d+)\.md$")
+
     def _emit_new_audits(self, domain: str, run_id: str) -> None:
-        """Publish AuditEvent for any new verification/audit_round_N.json."""
+        """Publish AuditEvent for any new verification/*round_N.md report.
+
+        The engine writes round_N.md (recon) / harvest_round_N.md (harvest) —
+        markdown. The previous audit_round_*.json glob matched nothing the
+        engine ever wrote, so audit verdicts never reached the dashboard
+        (vndb 2026-06-10: the auditor's "not the kernel's deliverable" caveat
+        sat invisible on disk behind a clean PASS badge).
+        """
         verif = WebConfig.run_dir(domain, run_id) / "verification"
         if not verif.is_dir():
             return
-        for f in sorted(verif.glob("audit_round_*.json")):
-            if f.name in self._seen_audits:
+        for f in sorted(verif.iterdir()):
+            m = self._AUDIT_MD_RE.match(f.name)
+            if m is None or f.name in self._seen_audits:
                 continue
             self._seen_audits.add(f.name)
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
+                text = f.read_text(encoding="utf-8")
             except Exception:
                 continue
-            m = re.search(r"audit_round_(\d+)", f.name)
+            om = re.search(r"\*\*Overall:\*\*\s*(\w+)", text)
+            # The part the human actually needs: the auditor's reasoning
+            # (especially PASS-with-caveats), or the mechanical failures.
+            report = ""
+            vm = re.search(r"## Auditor verdict\s*\n(.*)", text, re.DOTALL)
+            fm = re.search(r"## Mechanical sanity failures\s*\n(.*?)(?:\n## |$)", text, re.DOTALL)
+            if vm:
+                report = vm.group(1).strip()
+            elif fm:
+                report = fm.group(1).strip()
             self.bus.publish(
                 AuditEvent(
-                    round=int(m.group(1)) if m else 1,
-                    overall=data.get("overall", ""),
-                    blocking_summary=data.get("blocking_summary", ""),
+                    round=int(m.group(2)),
+                    kind="harvest" if m.group(1) == "harvest_round" else "recon",
+                    overall=om.group(1) if om else "",
+                    report=report[:4000],
                 )
             )
 

@@ -159,9 +159,12 @@
               <div class="empty" x-show="!(artifacts.data || []).length">暂无数据文件</div>
             </div>
             <div x-show="audit" style="margin-top:14px;">
-              <div class="seclabel">Audit</div>
+              <div class="seclabel">Audit
+                <span x-show="audit" x-text="audit ? ((audit.kind || '') + ' · round ' + audit.round) : ''"></span></div>
               <div class="item"><span class="badge" :class="audit && audit.overall==='PASS' ? 'pass':'blocked'" x-text="audit && audit.overall"></span>
-                <div class="txt" style="margin-top:6px;" x-text="audit && audit.blocking_summary"></div></div>
+                <div class="txt" style="margin-top:6px;" x-show="audit && audit.blocking_summary" x-text="audit && audit.blocking_summary"></div>
+                <div class="txt" style="margin-top:6px; max-height:200px; overflow-y:auto; white-space:pre-wrap; font-size:12px;"
+                     x-show="audit && audit.report" x-text="audit && audit.report"></div></div>
             </div>
           </div>
         </template>
