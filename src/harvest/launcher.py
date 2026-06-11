@@ -42,6 +42,7 @@ from src.agent.tools import (
     press_key,
     read_network,
     read_wm,
+    research,
     scroll,
     think,
 )
@@ -141,10 +142,10 @@ def build_harvest_registry() -> ToolRegistry:
     """
     registry = ToolRegistry()
     tools = [
-        # Recon tool set (14)
+        # Recon tool set (15)
         think, read_wm, browse, read_network, browser_eval, browser_reset,
         click, input_tool, press_key, scroll, go_back, bash_tool,
-        human_assist_tool, fetch,
+        human_assist_tool, fetch, research,
         # Harvest additions
         apply_patch_tool,
         mark_done_tool,
