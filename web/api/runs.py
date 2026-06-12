@@ -61,7 +61,7 @@ async def launch_run(
     from_run = (from_run or "").strip() or None
     req = LaunchRunRequest(
         domain=domain.strip(),
-        requirement=requirement.strip(),
+        requirement=" ".join(requirement.split()),
         mode=mode if mode in ("explore", "auto", "harvest") else "auto",
         gate=gate is not None,
         headed=headed is not None,
